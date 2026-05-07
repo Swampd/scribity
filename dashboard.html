@@ -2626,7 +2626,7 @@
                                                         return (
                                                             <div className="flex items-center gap-2">
                                                                 <label className="text-xs text-slate-500 uppercase font-bold shrink-0">Connect:</label>
-                                                                <div className="relative">
+                                                                <div className="flex items-center gap-1">
                                                                     <input
                                                                         type="text"
                                                                         className="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded px-2 py-1 w-[240px] focus:border-emerald-500 outline-none"
@@ -2639,7 +2639,7 @@
                                                                     {currentItem.id_source && (
                                                                         <button
                                                                             onClick={() => handleItemChange('id_source', '')}
-                                                                            className="absolute right-1.5 top-1 text-slate-600 hover:text-red-400 transition-colors"
+                                                                            className="p-1 text-slate-600 hover:text-red-400 transition-colors"
                                                                             title="Unlink source"
                                                                         >
                                                                             <Icon name="x" size={12} />
@@ -2686,6 +2686,15 @@
                                                                 <span className="block text-[10px] uppercase text-slate-600 font-bold">Author</span>
                                                                 <span className="text-slate-200">{linkedSource.author}</span>
                                                             </div>
+                                                            {linkedSource.url && (
+                                                                <div className="col-span-2">
+                                                                    <span className="block text-[10px] uppercase text-slate-600 font-bold">URL</span>
+                                                                    <a href={linkedSource.url} target="_blank" rel="noreferrer"
+                                                                       className="text-emerald-400 hover:text-emerald-300 text-xs break-all transition-colors">
+                                                                        {linkedSource.url}
+                                                                    </a>
+                                                                </div>
+                                                            )}
                                                             <div className="col-span-2">
                                                                 <span className="block text-[10px] uppercase text-slate-600 font-bold">Details</span>
                                                                 <span className="text-slate-200">{linkedSource.additional_source_details}</span>
@@ -3135,21 +3144,61 @@
                                                     </div>
                                                     <span className="text-slate-700">|</span>
                                                     <span className="text-xs text-slate-500 font-mono truncate flex-1">{parseResult.selected_path || parseResult.filepath || ''}</span>
-                                                    <button
-                                                        onClick={() => {
-                                                            const newItems = [...items, ...parseResult.items];
-                                                            const existingSourceIds = new Set(sources.map(s => s.id_source));
-                                                            const newSources = [...sources, ...parseResult.sources.filter(s => !existingSourceIds.has(s.id_source))];
-                                                            saveItems(newItems);
-                                                            saveSources(newSources);
-                                                            setParseResult(null);
-                                                            setView('library');
-                                                            setStatus('Imported');
-                                                        }}
-                                                        className="bg-green-600 hover:bg-green-500 text-white px-4 py-1.5 rounded font-bold text-xs flex items-center gap-2 transition-colors shrink-0"
-                                                    >
-                                                        <Icon name="download" size={14} /> Import All
-                                                    </button>
+                                                    <div className="flex items-center gap-2 shrink-0">
+                                                        <button
+                                                            onClick={async () => {
+                                                                // Save to new file via server picker
+                                                                try {
+                                                                    const ir = await fetch('http://localhost:8000/api/save_items_as', {
+                                                                        method: 'POST',
+                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                        body: JSON.stringify({ data: parseResult.items })
+                                                                    });
+                                                                    const id = await ir.json();
+                                                                    if (id.status === 'canceled') return;
+                                                                    if (id.status !== 'success') { setParseError('Failed to save items: ' + (id.message || '')); return; }
+                                                                    const sr = await fetch('http://localhost:8000/api/save_sources_as', {
+                                                                        method: 'POST',
+                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                        body: JSON.stringify({ data: parseResult.sources })
+                                                                    });
+                                                                    const sd = await sr.json();
+                                                                    if (sd.status === 'canceled') return;
+                                                                    // Reload from server so active file switches
+                                                                    const reload = await fetch('http://localhost:8000/api/data');
+                                                                    const fresh = await reload.json();
+                                                                    const freshRaw = fresh.items || [];
+                                                                    const freshMode = detectSchemaMode(freshRaw);
+                                                                    setSchemaMode(freshMode);
+                                                                    setItems(normalizeItems(freshRaw, freshMode));
+                                                                    setSources(fresh.sources || []);
+                                                                    setItemsFilename(fresh.items_filename || id.filename || '');
+                                                                    setSourcesFilename(fresh.sources_filename || sd.filename || '');
+                                                                    setParseResult(null);
+                                                                    setView('library');
+                                                                    setStatus('Saved to new file and loaded');
+                                                                } catch (e) { setParseError('Server error: ' + e.message); }
+                                                            }}
+                                                            className="bg-orange-600 hover:bg-orange-500 text-white px-4 py-1.5 rounded font-bold text-xs flex items-center gap-2 transition-colors"
+                                                        >
+                                                            <Icon name="file-plus" size={14} /> Save to New File
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                const newItems = [...items, ...parseResult.items];
+                                                                const existingSourceIds = new Set(sources.map(s => s.id_source));
+                                                                const newSources = [...sources, ...parseResult.sources.filter(s => !existingSourceIds.has(s.id_source))];
+                                                                saveItems(newItems);
+                                                                saveSources(newSources);
+                                                                setParseResult(null);
+                                                                setView('library');
+                                                                setStatus('Appended to current file');
+                                                            }}
+                                                            className="bg-green-700 hover:bg-green-600 text-white px-4 py-1.5 rounded font-bold text-xs flex items-center gap-2 transition-colors"
+                                                        >
+                                                            <Icon name="download" size={14} /> Append to Current
+                                                        </button>
+                                                    </div>
                                                 </div>
 
                                                 {/* Per-file breakdown (if folder) */}
