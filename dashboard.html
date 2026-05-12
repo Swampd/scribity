@@ -836,6 +836,7 @@
             const [floatingBtn, setFloatingBtn] = useState(null);
             const [showCreateMenu, setShowCreateMenu] = useState(false);
             const [showSaveMenu, setShowSaveMenu] = useState(false);
+            const [newDocModal, setNewDocModal] = useState(false);
             const [sidebarWidth, setSidebarWidth] = useState(300);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
             const sidebarWidthBeforeCollapse = useRef(300);
@@ -2076,10 +2077,68 @@
                                                 >
                                                     <Icon name="file-text" size={15} className="text-orange-400" /> Import DRR Report
                                                 </button>
+                                                <div className="border-t border-slate-700" />
+                                                <button
+                                                    onClick={() => { setNewDocModal(true); setShowCreateMenu(false); }}
+                                                    className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-200 hover:bg-violet-600 hover:text-white transition-colors"
+                                                >
+                                                    <Icon name="file" size={15} className="text-violet-400" /> New Document
+                                                </button>
                                             </div>
                                         </>
                                     )}
                                 </div>
+
+                                {/* New Document — mode picker modal */}
+                                {newDocModal && (
+                                    <>
+                                        <div className="fixed inset-0 z-50 bg-black/60" onClick={() => setNewDocModal(false)} />
+                                        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+                                            <div className="bg-slate-900 border border-slate-600 rounded-xl shadow-2xl shadow-black/60 p-6 w-80 pointer-events-auto">
+                                                <h3 className="text-white font-bold text-base mb-1">New Document</h3>
+                                                <p className="text-slate-400 text-xs mb-5">Choose a schema, then pick where to save the two new JSON files.</p>
+                                                <div className="flex flex-col gap-3">
+                                                    {[
+                                                        { mode: 'improv',   label: 'Book Mode',  sub: 'Rules & subparts',           icon: 'book' },
+                                                        { mode: 'research', label: 'Show Mode',  sub: 'Categories from DRR reports', icon: 'film' }
+                                                    ].map(({ mode, label, sub, icon }) => (
+                                                        <button
+                                                            key={mode}
+                                                            onClick={async () => {
+                                                                setNewDocModal(false);
+                                                                try {
+                                                                    const r = await fetch('http://localhost:8000/api/new_document', { method: 'POST' });
+                                                                    const d = await r.json();
+                                                                    if (d.status === 'canceled') return;
+                                                                    if (d.status !== 'success') { showErrorToast('New document failed: ' + (d.message || '')); return; }
+                                                                    setSchemaMode(mode);
+                                                                    setItems([]);
+                                                                    setSources([]);
+                                                                    setItemsFilename(d.items_filename || 'items.json');
+                                                                    setSourcesFilename(d.sources_filename || 'sources.json');
+                                                                    setSelectedRule('__all__');
+                                                                    setSelectedItemId(null);
+                                                                    setView('library');
+                                                                    setStatus('New ' + mode + ' document');
+                                                                } catch (e) { showErrorToast('Server error: ' + e.message); }
+                                                            }}
+                                                            className="flex items-start gap-3 p-3 rounded-lg border border-slate-700 hover:border-slate-500 hover:bg-slate-800 text-left transition-all"
+                                                        >
+                                                            <div className="mt-0.5 p-1.5 rounded-md bg-slate-800 text-slate-400">
+                                                                <Icon name={icon} size={14} />
+                                                            </div>
+                                                            <div>
+                                                                <div className="text-slate-100 font-bold text-sm">{label}</div>
+                                                                <div className="text-slate-500 text-[11px]">{sub}</div>
+                                                            </div>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                                <button onClick={() => setNewDocModal(false)} className="mt-4 w-full text-xs text-slate-600 hover:text-slate-400 transition-colors">Cancel</button>
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
                             </div>
                         </div>
 
@@ -3147,24 +3206,16 @@
                                                     <div className="flex items-center gap-2 shrink-0">
                                                         <button
                                                             onClick={async () => {
-                                                                // Save to new file via server picker
                                                                 try {
-                                                                    const ir = await fetch('http://localhost:8000/api/save_items_as', {
+                                                                    const r = await fetch('http://localhost:8000/api/save_new_document', {
                                                                         method: 'POST',
                                                                         headers: { 'Content-Type': 'application/json' },
-                                                                        body: JSON.stringify({ data: parseResult.items })
+                                                                        body: JSON.stringify({ items: parseResult.items, sources: parseResult.sources })
                                                                     });
-                                                                    const id = await ir.json();
-                                                                    if (id.status === 'canceled') return;
-                                                                    if (id.status !== 'success') { setParseError('Failed to save items: ' + (id.message || '')); return; }
-                                                                    const sr = await fetch('http://localhost:8000/api/save_sources_as', {
-                                                                        method: 'POST',
-                                                                        headers: { 'Content-Type': 'application/json' },
-                                                                        body: JSON.stringify({ data: parseResult.sources })
-                                                                    });
-                                                                    const sd = await sr.json();
-                                                                    if (sd.status === 'canceled') return;
-                                                                    // Reload from server so active file switches
+                                                                    const d = await r.json();
+                                                                    if (d.status === 'canceled') return;
+                                                                    if (d.status !== 'success') { setParseError('Save failed: ' + (d.message || '')); return; }
+                                                                    // Reload — apply full normalization same as initial fetchData
                                                                     const reload = await fetch('http://localhost:8000/api/data');
                                                                     const fresh = await reload.json();
                                                                     const freshRaw = fresh.items || [];
@@ -3172,8 +3223,8 @@
                                                                     setSchemaMode(freshMode);
                                                                     setItems(normalizeItems(freshRaw, freshMode));
                                                                     setSources(fresh.sources || []);
-                                                                    setItemsFilename(fresh.items_filename || id.filename || '');
-                                                                    setSourcesFilename(fresh.sources_filename || sd.filename || '');
+                                                                    setItemsFilename(d.items_filename || '');
+                                                                    setSourcesFilename(d.sources_filename || '');
                                                                     setParseResult(null);
                                                                     setView('library');
                                                                     setStatus('Saved to new file and loaded');

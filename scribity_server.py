@@ -22,15 +22,16 @@ except Exception:
     pass
 
 # --- CONFIGURATION ---
-PORT = 8000
+PORT      = 8000
 HTML_FILE = 'dashboard.html'
 
-# Default file paths (absolute paths to working files)
-ITEMS_PATH = r"C:\Users\Face\Desktop\rules_of_improv\rules\rules_of_improv.json"
-SOURCES_PATH = r"C:\Users\Face\Desktop\rules_of_improv\sources\sources.json"
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 HTML_PATH = os.path.join(BASE_DIR, HTML_FILE)
+
+# Default file paths — relative to the server script.
+# Use the file picker (Items/Sources buttons) to load a different file.
+ITEMS_PATH   = os.path.join(BASE_DIR, 'items.json')
+SOURCES_PATH = os.path.join(BASE_DIR, 'sources.json')
 
 app = Flask(__name__)
 CORS(app)
@@ -372,7 +373,117 @@ def save_sources_as():
         print(e)
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# --- NEW EMPTY DOCUMENT ---
+
+@app.route('/api/new_document', methods=['POST'])
+def new_document():
+    """Open two save-as dialogs, write empty JSON arrays to both paths,
+    then switch globals — both or neither (cancel-safe)."""
+    global ITEMS_PATH, SOURCES_PATH
+    if not TK_AVAILABLE:
+        return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', 1)
+
+        items_path = filedialog.asksaveasfilename(
+            initialdir=BASE_DIR,
+            initialfile='items.json',
+            title="New Document — Save Items As (1 of 2)",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+            defaultextension=".json"
+        )
+        if not items_path:
+            root.destroy()
+            return jsonify({"status": "canceled"})
+
+        sources_path = filedialog.asksaveasfilename(
+            initialdir=os.path.dirname(items_path),
+            initialfile='sources.json',
+            title="New Document — Save Sources As (2 of 2)",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+            defaultextension=".json"
+        )
+        root.destroy()
+        if not sources_path:
+            return jsonify({"status": "canceled"})
+
+        # Write empty arrays, then update globals
+        save_json(items_path,   [])
+        save_json(sources_path, [])
+        ITEMS_PATH   = items_path
+        SOURCES_PATH = sources_path
+        print(f"New empty document created — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
+
+        return jsonify({
+            "status": "success",
+            "items_filename":   os.path.basename(items_path),
+            "sources_filename": os.path.basename(sources_path)
+        })
+    except Exception as e:
+        print(e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# --- SAVE NEW DOCUMENT (atomic: both files or neither path is updated) ---
+
+@app.route('/api/save_new_document', methods=['POST'])
+def save_new_document():
+    """Open two save dialogs, write both files, then update both globals.
+    Globals only mutate if BOTH saves succeed — no split-state on cancel or error."""
+    global ITEMS_PATH, SOURCES_PATH
+    if not TK_AVAILABLE:
+        return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
+    try:
+        items_data  = request.json.get('items',   [])
+        sources_data = request.json.get('sources', [])
+
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', 1)
+
+        # Dialog 1 of 2 — items file
+        items_path = filedialog.asksaveasfilename(
+            initialdir=os.path.dirname(ITEMS_PATH) if os.path.exists(ITEMS_PATH) else BASE_DIR,
+            initialfile=os.path.basename(ITEMS_PATH),
+            title="Save Items As (1 of 2)",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+            defaultextension=".json"
+        )
+        if not items_path:
+            root.destroy()
+            return jsonify({"status": "canceled"})
+
+        # Dialog 2 of 2 — sources file
+        sources_path = filedialog.asksaveasfilename(
+            initialdir=os.path.dirname(SOURCES_PATH) if os.path.exists(SOURCES_PATH) else BASE_DIR,
+            initialfile=os.path.basename(SOURCES_PATH),
+            title="Save Sources As (2 of 2)",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+            defaultextension=".json"
+        )
+        root.destroy()
+        if not sources_path:
+            return jsonify({"status": "canceled"})
+
+        # Both paths confirmed — write files, THEN update globals
+        save_json(items_path,   items_data)
+        save_json(sources_path, sources_data)
+        ITEMS_PATH   = items_path
+        SOURCES_PATH = sources_path
+        print(f"New document saved — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
+
+        return jsonify({
+            "status": "success",
+            "items_filename":   os.path.basename(items_path),
+            "sources_filename": os.path.basename(sources_path)
+        })
+    except Exception as e:
+        print(e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 # --- DRR PARSER ENDPOINTS ---
+
 
 try:
     from parse_drr import parse_mdx_file, parse_mdx_folder
