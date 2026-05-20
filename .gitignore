@@ -1,10 +1,12 @@
 # === User Data (not code) ===
 items.json
 sources.json
+scribity_config.json
 *.json.tmp
 
 # === Working files ===
 WIP/
+admin/
 
 # === Python ===
 __pycache__/

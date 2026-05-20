@@ -27,11 +27,14 @@ HTML_FILE = 'dashboard.html'
 
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 HTML_PATH = os.path.join(BASE_DIR, HTML_FILE)
+CONFIG_PATH = os.path.join(BASE_DIR, 'scribity_config.json')
 
 # Default file paths — relative to the server script.
 # Use the file picker (Items/Sources buttons) to load a different file.
-ITEMS_PATH   = os.path.join(BASE_DIR, 'items.json')
-SOURCES_PATH = os.path.join(BASE_DIR, 'sources.json')
+DEFAULT_ITEMS_PATH   = os.path.join(BASE_DIR, 'items.json')
+DEFAULT_SOURCES_PATH = os.path.join(BASE_DIR, 'sources.json')
+ITEMS_PATH   = DEFAULT_ITEMS_PATH
+SOURCES_PATH = DEFAULT_SOURCES_PATH
 
 app = Flask(__name__)
 CORS(app)
@@ -152,6 +155,38 @@ def save_json(path, data):
     # Atomic rename (overwrites existing file)
     os.replace(tmp_path, path)
 
+def load_config():
+    """Load machine-local Scribity settings, falling back to portable defaults."""
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        return config if isinstance(config, dict) else {}
+    except Exception as e:
+        print(f"Could not read config at {CONFIG_PATH}: {e}")
+        return {}
+
+def save_config():
+    """Persist the currently selected item/source files for the next launch."""
+    save_json(CONFIG_PATH, {
+        "items_path": ITEMS_PATH,
+        "sources_path": SOURCES_PATH,
+    })
+
+def restore_last_used_paths():
+    """Restore last-used files if a local config exists."""
+    global ITEMS_PATH, SOURCES_PATH
+    config = load_config()
+    items_path = config.get("items_path")
+    sources_path = config.get("sources_path")
+    if isinstance(items_path, str) and items_path:
+        ITEMS_PATH = items_path
+    if isinstance(sources_path, str) and sources_path:
+        SOURCES_PATH = sources_path
+
+restore_last_used_paths()
+
 @app.route('/')
 def index():
     if not os.path.exists(HTML_PATH):
@@ -202,6 +237,7 @@ def open_items_picker():
             ITEMS_PATH = file_path
             print(f"Switched Items file to: {ITEMS_PATH}")
             data = load_json(ITEMS_PATH, ITEM_TEMPLATE)
+            save_config()
             return jsonify({
                 "status": "success", 
                 "filename": os.path.basename(ITEMS_PATH),
@@ -241,6 +277,7 @@ def open_sources_picker():
             SOURCES_PATH = file_path
             print(f"Switched Sources file to: {SOURCES_PATH}")
             data = load_json(SOURCES_PATH, SOURCE_TEMPLATE)
+            save_config()
             return jsonify({
                 "status": "success", 
                 "filename": os.path.basename(SOURCES_PATH),
@@ -266,6 +303,7 @@ def switch_items_manual():
         ITEMS_PATH = new_path
         print(f"Switched Items file to: {ITEMS_PATH}")
         data = load_json(ITEMS_PATH, ITEM_TEMPLATE)
+        save_config()
         return jsonify({
             "status": "success", 
             "filename": os.path.basename(ITEMS_PATH),
@@ -285,6 +323,7 @@ def switch_sources_manual():
         SOURCES_PATH = new_path
         print(f"Switched Sources file to: {SOURCES_PATH}")
         data = load_json(SOURCES_PATH, SOURCE_TEMPLATE)
+        save_config()
         return jsonify({
             "status": "success", 
             "filename": os.path.basename(SOURCES_PATH),
@@ -338,6 +377,7 @@ def save_items_as():
         if file_path:
             save_json(file_path, new_data)
             ITEMS_PATH = file_path
+            save_config()
             print(f"Saved Items As: {ITEMS_PATH}")
             return jsonify({"status": "success", "filename": os.path.basename(file_path)})
         return jsonify({"status": "canceled"})
@@ -366,6 +406,7 @@ def save_sources_as():
         if file_path:
             save_json(file_path, new_data)
             SOURCES_PATH = file_path
+            save_config()
             print(f"Saved Sources As: {SOURCES_PATH}")
             return jsonify({"status": "success", "filename": os.path.basename(file_path)})
         return jsonify({"status": "canceled"})
@@ -414,6 +455,7 @@ def new_document():
         save_json(sources_path, [])
         ITEMS_PATH   = items_path
         SOURCES_PATH = sources_path
+        save_config()
         print(f"New empty document created — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
 
         return jsonify({
@@ -471,6 +513,7 @@ def save_new_document():
         save_json(sources_path, sources_data)
         ITEMS_PATH   = items_path
         SOURCES_PATH = sources_path
+        save_config()
         print(f"New document saved — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
 
         return jsonify({
@@ -490,27 +533,6 @@ try:
     DRR_PARSER_AVAILABLE = True
 except ImportError:
     DRR_PARSER_AVAILABLE = False
-
-@app.route('/api/parse_drr', methods=['POST'])
-def parse_drr_endpoint():
-    """Parse a DRR .mdx file or folder. Accepts { path: '...' }.
-    Returns parsed items and sources for preview before import."""
-    if not DRR_PARSER_AVAILABLE:
-        return jsonify({"status": "error", "message": "parse_drr module not found"}), 500
-    try:
-        target_path = request.json.get('path', '')
-        if not target_path or not os.path.exists(target_path):
-            return jsonify({"status": "error", "message": f"Path not found: {target_path}"}), 400
-
-        if os.path.isdir(target_path):
-            result = parse_mdx_folder(target_path)
-        else:
-            result = parse_mdx_file(target_path)
-
-        return jsonify({"status": "success", **result})
-    except Exception as e:
-        print(f"DRR parse error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/parse_drr_picker', methods=['POST'])
 def parse_drr_picker():

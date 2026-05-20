@@ -913,6 +913,17 @@
             ], [labels]);
             const [searchFields, setSearchFields] = useState(() => new Set(SEARCH_FIELDS.map(f => f.key)));
             const [showSearchFields, setShowSearchFields] = useState(false);
+            const searchFieldsRef = useRef(null);
+            useEffect(() => {
+                if (!showSearchFields) return;
+                const handleOutsideClick = (e) => {
+                    if (searchFieldsRef.current && !searchFieldsRef.current.contains(e.target)) {
+                        setShowSearchFields(false);
+                    }
+                };
+                document.addEventListener('mousedown', handleOutsideClick);
+                return () => document.removeEventListener('mousedown', handleOutsideClick);
+            }, [showSearchFields]);
 
             // Draft/Render state
             const [selectedScriptPart, setSelectedScriptPart] = useState('__all__');
@@ -933,6 +944,8 @@
             // Source search combobox state
             const [srcQuery, setSrcQuery] = useState('');
             const [srcOpen, setSrcOpen] = useState(false);
+            // QoL #5: Reset combobox when navigating between items
+            useEffect(() => { setSrcQuery(''); setSrcOpen(false); }, [selectedItemId]);
 
             // File tracking
             const [itemsFilename, setItemsFilename] = useState('No file');
@@ -1174,9 +1187,6 @@
                         return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
                     });
             }, [items]);
-
-            // Legacy: for filtering, we still need a simple key
-            const availableRules = useMemo(() => ruleHierarchy.map(r => r.name), [ruleHierarchy]);
 
             // Filtered Items for Main View + search match map (computed together to avoid setState during render)
             const { filteredItems, searchMatchMap } = useMemo(() => {
@@ -1949,7 +1959,7 @@
                                     <button onClick={() => setView('render')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'render' ? 'bg-amber-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Render</button>
                                     <button onClick={() => setView('sources')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'sources' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Sources</button>
                                 </div>
-                                <div className="relative">
+                                <div className="relative" ref={searchFieldsRef}>
                                     <Icon name="search" size={14} className="absolute left-3 top-2 text-slate-500" />
                                     <input
                                         type="text"
