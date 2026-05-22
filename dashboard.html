@@ -877,6 +877,14 @@
 
             // E016: Suppressible delete confirmation
             const [suppressDeleteConfirm, setSuppressDeleteConfirm] = useState(false);
+            const [deleteConfirm, setDeleteConfirm] = useState(null); // { title, message, detail, confirmLabel, onConfirm }
+            const requestDeleteConfirmation = ({ title, message, detail, confirmLabel = 'Delete', onConfirm }) => {
+                if (suppressDeleteConfirm) {
+                    onConfirm();
+                    return;
+                }
+                setDeleteConfirm({ title, message, detail, confirmLabel, onConfirm });
+            };
 
             // E015: Quick-filter chips
             const [activeFilters, setActiveFilters] = useState(new Set());
@@ -928,7 +936,6 @@
             // Draft/Render state
             const [selectedScriptPart, setSelectedScriptPart] = useState('__all__');
             const [hideFactsInRender, setHideFactsInRender] = useState(false);
-            const [editingTextareaId, setEditingTextareaId] = useState(null);
             const isResizing = useRef(false);
             const draftSaveTimer = useRef(null);
             const inspectorSaveTimer = useRef(null);
@@ -1646,6 +1653,54 @@
                                 <Icon name="alert-triangle" size={20} className="text-red-300" />
                                 {errorToast}
                                 <span className="text-red-400 text-xs ml-2">(click to dismiss)</span>
+                            </div>
+                        </div>
+                    )}
+
+                    {deleteConfirm && (
+                        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4" onMouseDown={() => setDeleteConfirm(null)}>
+                            <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-xl shadow-2xl shadow-black/50 overflow-hidden" onMouseDown={(e) => e.stopPropagation()}>
+                                <div className="p-5 border-b border-slate-800 flex items-start gap-3">
+                                    <div className="w-10 h-10 rounded-lg bg-red-950/70 border border-red-800 flex items-center justify-center shrink-0">
+                                        <Icon name="trash-2" size={18} className="text-red-400" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-100">{deleteConfirm.title}</h3>
+                                        <p className="text-sm text-slate-400 mt-1">{deleteConfirm.message}</p>
+                                        {deleteConfirm.detail && (
+                                            <p className="text-xs text-slate-500 mt-2">{deleteConfirm.detail}</p>
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="p-5">
+                                    <label className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer mb-5">
+                                        <input
+                                            type="checkbox"
+                                            className="w-3.5 h-3.5 accent-indigo-500"
+                                            checked={suppressDeleteConfirm}
+                                            onChange={(e) => setSuppressDeleteConfirm(e.target.checked)}
+                                        />
+                                        Don't ask to confirm deletes this session
+                                    </label>
+                                    <div className="flex items-center justify-end gap-3">
+                                        <button
+                                            onClick={() => setDeleteConfirm(null)}
+                                            className="px-4 py-2 rounded-lg text-sm font-bold text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                const action = deleteConfirm.onConfirm;
+                                                setDeleteConfirm(null);
+                                                action();
+                                            }}
+                                            className="px-4 py-2 rounded-lg text-sm font-bold bg-red-700 hover:bg-red-600 text-white flex items-center gap-2 transition-colors"
+                                        >
+                                            <Icon name="trash-2" size={14} /> {deleteConfirm.confirmLabel}
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     )}
@@ -2425,10 +2480,17 @@
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
-                                                            if (!suppressDeleteConfirm && !confirm('Delete this item?\n\n(Tip: You can undo with Ctrl+Z)')) return;
-                                                            const prev = [...items];
-                                                            saveItems(items.filter(i => i.id_item !== item.id_item));
-                                                            showDeleteToast('Item deleted', 'items', prev);
+                                                            requestDeleteConfirmation({
+                                                                title: 'Delete item?',
+                                                                message: 'This item will be removed from the library.',
+                                                                detail: 'You can restore it immediately from the undo toast or with Ctrl+Z.',
+                                                                confirmLabel: 'Delete Item',
+                                                                onConfirm: () => {
+                                                                    const prev = [...items];
+                                                                    saveItems(items.filter(i => i.id_item !== item.id_item));
+                                                                    showDeleteToast('Item deleted', 'items', prev);
+                                                                },
+                                                            });
                                                         }}
                                                         className="opacity-0 group-hover:opacity-100 bg-red-900/50 border border-red-700 text-red-400 hover:bg-red-800 px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition-opacity"
                                                     >
@@ -2510,13 +2572,22 @@
                                         </button>
                                         <button
                                             onClick={() => {
-                                                if (!suppressDeleteConfirm && !confirm(`Delete ${bulkSelectedIds.size} selected items?\n\n(Tip: You can undo with Ctrl+Z)`)) return;
-                                                const prev = [...items];
-                                                const updated = items.filter(i => !bulkSelectedIds.has(i.id_item));
-                                                saveItems(updated);
-                                                showDeleteToast(`${bulkSelectedIds.size} items deleted`, 'items', prev);
-                                                setBulkSelectedIds(new Set());
-                                                lastBulkClickIdx.current = null;
+                                                const selectedIds = new Set(bulkSelectedIds);
+                                                const selectedCount = selectedIds.size;
+                                                requestDeleteConfirmation({
+                                                    title: `Delete ${selectedCount} selected items?`,
+                                                    message: 'These items will be removed from the library.',
+                                                    detail: 'You can restore them immediately from the undo toast or with Ctrl+Z.',
+                                                    confirmLabel: `Delete ${selectedCount}`,
+                                                    onConfirm: () => {
+                                                        const prev = [...items];
+                                                        const updated = items.filter(i => !selectedIds.has(i.id_item));
+                                                        saveItems(updated);
+                                                        showDeleteToast(`${selectedCount} items deleted`, 'items', prev);
+                                                        setBulkSelectedIds(new Set());
+                                                        lastBulkClickIdx.current = null;
+                                                    },
+                                                });
                                             }}
                                             className="text-xs bg-red-900/40 border border-red-700 text-red-400 hover:bg-red-800/50 px-3 py-1.5 rounded font-bold flex items-center gap-1 transition-colors"
                                         >
@@ -2594,11 +2665,19 @@
                                                             if (currentItem) cloneItem(currentItem);
                                                         }} className="bg-teal-900/30 border border-teal-700 text-teal-400 hover:bg-teal-800/50 px-3 py-1.5 rounded text-xs font-bold flex items-center gap-2 transition-colors"><Icon name="copy" size={14} /> CLONE</button>
                                                         <button onClick={() => {
-                                                            if (!suppressDeleteConfirm && !confirm('Delete this item?\n\n(Tip: You can undo with Ctrl+Z)')) return;
-                                                            const prev = [...items];
-                                                            saveItems(items.filter(i => i.id_item !== selectedItemId));
-                                                            showDeleteToast('Item deleted', 'items', prev);
-                                                            setView('library');
+                                                            const itemId = selectedItemId;
+                                                            requestDeleteConfirmation({
+                                                                title: 'Delete item?',
+                                                                message: 'This item will be removed from the library.',
+                                                                detail: 'You can restore it immediately from the undo toast or with Ctrl+Z.',
+                                                                confirmLabel: 'Delete Item',
+                                                                onConfirm: () => {
+                                                                    const prev = [...items];
+                                                                    saveItems(items.filter(i => i.id_item !== itemId));
+                                                                    showDeleteToast('Item deleted', 'items', prev);
+                                                                    setView('library');
+                                                                },
+                                                            });
                                                         }} className="bg-red-900/30 border border-red-700 text-red-400 hover:bg-red-800/50 px-3 py-1.5 rounded text-xs font-bold flex items-center gap-2 transition-colors"><Icon name="trash-2" size={14} /> DELETE ITEM</button>
                                                     </div>
                                                 </div>
@@ -2909,8 +2988,7 @@
                                                             saveItems(itemsRef.current.map(it => it.id_item === item.id_item ? { ...it, user_02_comments: val } : it));
                                                         }, 600);
                                                     }}
-                                                    onFocus={(e) => { setEditingTextareaId(item.id_item); autoResizeTextarea(e); }}
-                                                    onBlur={() => setEditingTextareaId(null)}
+                                                    onFocus={(e) => autoResizeTextarea(e)}
                                                     onInput={(e) => autoResizeTextarea(e)}
                                                     placeholder="Write your script notes here..."
                                                     style={{ minHeight: '2rem' }}
@@ -3340,10 +3418,17 @@
                                                         <p className="text-xs text-slate-500">{source.id_source}</p>
                                                     </div>
                                                     <button onClick={() => {
-                                                        if (!suppressDeleteConfirm && !confirm('Delete this source? Items referencing it will lose their link.\n\n(Tip: You can undo with Ctrl+Z)')) return;
-                                                        const prev = [...sources];
-                                                        saveSources(sources.filter(s => s.id_source !== source.id_source));
-                                                        showDeleteToast('Source deleted', 'sources', prev);
+                                                        requestDeleteConfirmation({
+                                                            title: 'Delete source?',
+                                                            message: 'This source will be removed from the source database.',
+                                                            detail: 'Items that reference it will lose their visible linked-source details. You can restore it immediately from the undo toast.',
+                                                            confirmLabel: 'Delete Source',
+                                                            onConfirm: () => {
+                                                                const prev = [...sources];
+                                                                saveSources(sources.filter(s => s.id_source !== source.id_source));
+                                                                showDeleteToast('Source deleted', 'sources', prev);
+                                                            },
+                                                        });
                                                     }} className="bg-red-900/30 border border-red-700 text-red-400 hover:bg-red-800/50 px-3 py-1.5 rounded text-xs font-bold flex items-center gap-2 transition-colors"><Icon name="trash-2" size={14} /> DELETE</button>
                                                 </div>
 
