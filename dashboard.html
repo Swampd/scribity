@@ -225,10 +225,26 @@
             return 'improv';
         };
 
-        // Normalize: remap research field names → internal (rule_name) on load
-        const normalizeItems = (items, mode) => {
-            if (mode !== 'research') return items;
+        const ensureUniqueItemIds = (items) => {
+            const seenIds = new Set();
             return items.map(item => {
+                const existingId = typeof item?.id_item === 'string' ? item.id_item : '';
+                if (existingId.trim() && !seenIds.has(existingId)) {
+                    seenIds.add(existingId);
+                    return item;
+                }
+
+                const newId = crypto.randomUUID();
+                seenIds.add(newId);
+                return { ...item, id_item: newId };
+            });
+        };
+
+        // Normalize: ensure stable identities, then remap research fields → internal fields on load.
+        const normalizeItems = (items, mode) => {
+            const identifiedItems = ensureUniqueItemIds(items);
+            if (mode !== 'research') return identifiedItems;
+            return identifiedItems.map(item => {
                 const { category_part_name, category_part_number, ...rest } = item;
                 return {
                     ...rest,
@@ -815,6 +831,14 @@
             // Data States
             const [items, setItems] = useState([]);
             const [sources, setSources] = useState([]);
+            const sourceById = useMemo(() => {
+                const map = new Map();
+                sources.forEach(source => {
+                    // Match Array.find semantics if malformed data contains duplicate IDs.
+                    if (!map.has(source.id_source)) map.set(source.id_source, source);
+                });
+                return map;
+            }, [sources]);
 
             // UI States
             const [view, setView] = useState('library'); // library, sources, inspector
@@ -822,6 +846,9 @@
             const [selectedSourceId, setSelectedSourceId] = useState(null);
             const [searchQuery, setSearchQuery] = useState('');
             const [status, setStatus] = useState('Ready');
+            const [loadError, setLoadError] = useState(null);
+            const [itemsReady, setItemsReady] = useState(false);
+            const [sourcesReady, setSourcesReady] = useState(false);
             const [selectedRule, setSelectedRule] = useState('__all__');
             const [selectedSubpart, setSelectedSubpart] = useState(null); // null = show general (no-subpart) items; string = specific subpart
 
@@ -944,7 +971,11 @@
             const inspectorSaveTimer = useRef(null);
             const inspectorUndoSnapshot = useRef(null); // Captures pre-edit state for undo
             const sourceSaveTimer = useRef(null);
-            const ruleSaveTimer = useRef(null);
+
+            // Serialize saves and coalesce intermediate snapshots while a request is active.
+            // This prevents older requests from finishing after newer ones and overwriting them.
+            const itemsSaveQueue = useRef({ inFlight: false, pending: null });
+            const sourcesSaveQueue = useRef({ inFlight: false, pending: null });
 
             // DRR Parser state
             const [parseResult, setParseResult] = useState(null);
@@ -961,18 +992,40 @@
             const [itemsFilename, setItemsFilename] = useState('No file');
             const [sourcesFilename, setSourcesFilename] = useState('No file');
 
+            const readApiResponse = async (response) => {
+                let payload;
+                try {
+                    payload = await response.json();
+                } catch (error) {
+                    throw new Error(`Server returned an unreadable response (HTTP ${response.status}).`);
+                }
+                if (!response.ok || payload?.status === 'error') {
+                    throw new Error(payload?.message || `Request failed with HTTP ${response.status}.`);
+                }
+                return payload;
+            };
+
+            const reportLoadError = (error) => {
+                const message = error?.message || 'The document could not be loaded.';
+                setLoadError(message);
+                setStatus('Load Error');
+                showErrorToast(message);
+            };
+
             // --- FILE PICKER HANDLERS ---
             const openItemsPicker = async () => {
                 setStatus('Opening file picker...');
                 try {
                     const res = await api('open_items', { method: 'POST' });
-                    const json = await res.json();
+                    const json = await readApiResponse(res);
                     if (json.status === 'success') {
                         const rawPicked = json.data || [];
                         const pickedMode = detectSchemaMode(rawPicked);
                         setSchemaMode(pickedMode);
                         setItems(normalizeItems(rawPicked, pickedMode));
+                        setItemsReady(true);
                         setItemsFilename(json.filename);
+                        setLoadError(null);
                         setStatus(`Items loaded (${pickedMode})`);
                     } else if (json.status === 'gui_unavailable') {
                         const path = prompt('Tkinter unavailable. Enter full path to Items JSON file:');
@@ -982,13 +1035,15 @@
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ path })
                             });
-                            const manualJson = await manualRes.json();
+                            const manualJson = await readApiResponse(manualRes);
                             if (manualJson.status === 'success') {
                                 const rawManual = manualJson.data || [];
                                 const manualMode = detectSchemaMode(rawManual);
                                 setSchemaMode(manualMode);
                                 setItems(normalizeItems(rawManual, manualMode));
+                                setItemsReady(true);
                                 setItemsFilename(manualJson.filename);
+                                setLoadError(null);
                                 setStatus(`Items loaded (${manualMode})`);
                             }
                         }
@@ -996,8 +1051,7 @@
                         setStatus('Canceled');
                     }
                 } catch (e) {
-                    setStatus('Error opening file');
-                    console.error(e);
+                    reportLoadError(e);
                 }
             };
 
@@ -1005,10 +1059,12 @@
                 setStatus('Opening file picker...');
                 try {
                     const res = await api('open_sources', { method: 'POST' });
-                    const json = await res.json();
+                    const json = await readApiResponse(res);
                     if (json.status === 'success') {
                         setSources(json.data || []);
+                        setSourcesReady(true);
                         setSourcesFilename(json.filename);
+                        setLoadError(null);
                         setStatus('Sources loaded');
                     } else if (json.status === 'gui_unavailable') {
                         const path = prompt('Tkinter unavailable. Enter full path to Sources JSON file:');
@@ -1018,10 +1074,12 @@
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ path })
                             });
-                            const manualJson = await manualRes.json();
+                            const manualJson = await readApiResponse(manualRes);
                             if (manualJson.status === 'success') {
                                 setSources(manualJson.data || []);
+                                setSourcesReady(true);
                                 setSourcesFilename(manualJson.filename);
+                                setLoadError(null);
                                 setStatus('Sources loaded');
                             }
                         }
@@ -1029,8 +1087,7 @@
                         setStatus('Canceled');
                     }
                 } catch (e) {
-                    setStatus('Error opening file');
-                    console.error(e);
+                    reportLoadError(e);
                 }
             };
 
@@ -1039,18 +1096,22 @@
                 setStatus('Loading...');
                 try {
                     const res = await api('data');
-                    const json = await res.json();
+                    const json = await readApiResponse(res);
                     const rawItems = json.items || [];
                     const mode = detectSchemaMode(rawItems);
                     setSchemaMode(mode);
                     setItems(normalizeItems(rawItems, mode));
                     setSources(json.sources || []);
+                    setItemsReady(true);
+                    setSourcesReady(true);
                     setItemsFilename(json.items_filename || 'items.json');
                     setSourcesFilename(json.sources_filename || 'sources.json');
+                    setLoadError(null);
                     setStatus(`Loaded (${mode})`);
                 } catch (e) {
-                    setStatus('Error connecting to server');
-                    console.error(e);
+                    setItemsReady(false);
+                    setSourcesReady(false);
+                    reportLoadError(e);
                 }
             };
 
@@ -1058,34 +1119,102 @@
             const itemsRef = useRef(items);
             itemsRef.current = items;
 
-            const saveItems = async (newItems) => {
+            const enqueueSave = (queueRef, job) => {
+                const queue = queueRef.current;
+                queue.pending = job;
+                setStatus(job.savingStatus);
+
+                if (queue.inFlight) return;
+                queue.inFlight = true;
+
+                const drain = async () => {
+                    let activeJob = null;
+                    let finalStatus = job.successStatus;
+                    try {
+                        while (queue.pending) {
+                            activeJob = queue.pending;
+                            queue.pending = null;
+                            const response = await api(activeJob.endpoint, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: activeJob.serialize()
+                            });
+                            if (!response.ok) {
+                                throw new Error(`${activeJob.endpoint} failed with HTTP ${response.status}`);
+                            }
+                            finalStatus = activeJob.successStatus;
+                        }
+                        setStatus(finalStatus);
+                    } catch (error) {
+                        queue.pending = null;
+                        setStatus('Save Error');
+                        showErrorToast(activeJob?.errorMessage || 'Failed to save — server may be down');
+                        console.error(error);
+                    } finally {
+                        queue.inFlight = false;
+                    }
+                };
+
+                void drain();
+            };
+
+            const queueItemsSave = (newItems, successStatus = 'Saved') => {
+                if (!itemsReady) {
+                    showErrorToast('Items were not saved because no valid items document is loaded.');
+                    setStatus('Save Blocked');
+                    return false;
+                }
+                const mode = schemaModeRef.current;
+                enqueueSave(itemsSaveQueue, {
+                    endpoint: 'save_items',
+                    serialize: () => JSON.stringify(denormalizeItems(newItems, mode)),
+                    savingStatus: 'Saving Items...',
+                    successStatus,
+                    errorMessage: 'Failed to save items — server may be down'
+                });
+                return true;
+            };
+
+            const queueSourcesSave = (newSources, successStatus = 'Saved') => {
+                if (!sourcesReady) {
+                    showErrorToast('Sources were not saved because no valid sources document is loaded.');
+                    setStatus('Save Blocked');
+                    return false;
+                }
+                enqueueSave(sourcesSaveQueue, {
+                    endpoint: 'save_sources',
+                    serialize: () => JSON.stringify(newSources),
+                    savingStatus: 'Saving Sources...',
+                    successStatus,
+                    errorMessage: 'Failed to save sources — server may be down'
+                });
+                return true;
+            };
+
+            const saveItems = (newItems) => {
+                if (!itemsReady) {
+                    showErrorToast('Create or open a valid items document before making changes.');
+                    setStatus('Save Blocked');
+                    return false;
+                }
                 // E016: Push current state to undo stack before saving
                 undoStack.current.push([...itemsRef.current]);
                 if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
                 redoStack.current = []; // Clear redo on new action
                 setItems(newItems);
-                setStatus('Saving Items...');
-                try {
-                    await api('save_items', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(denormalizeItems(newItems, schemaMode))
-                    });
-                    setStatus('Saved');
-                } catch (e) { setStatus('Save Error'); showErrorToast('Failed to save items — server may be down'); }
+                queueItemsSave(newItems);
+                return true;
             };
 
-            const saveSources = async (newSources) => {
+            const saveSources = (newSources) => {
+                if (!sourcesReady) {
+                    showErrorToast('Create or open a valid sources document before making changes.');
+                    setStatus('Save Blocked');
+                    return false;
+                }
                 setSources(newSources);
-                setStatus('Saving Sources...');
-                try {
-                    await api('save_sources', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(newSources)
-                    });
-                    setStatus('Saved');
-                } catch (e) { setStatus('Save Error'); showErrorToast('Failed to save sources — server may be down'); }
+                queueSourcesSave(newSources);
+                return true;
             };
 
             useEffect(() => { fetchData(); }, []);
@@ -1105,11 +1234,7 @@
                         setItems(prev);
                         setStatus('Undone');
                         // Also save the restored state to server
-                        api('save_items', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(denormalizeItems(prev, schemaModeRef.current))
-                        }).then(() => setStatus('Saved (undo)')).catch(() => showErrorToast('Undo saved locally but failed to sync to server'));
+                        queueItemsSave(prev, 'Saved (undo)');
                         return;
                     }
                     // E016: Ctrl+Shift+Z redo
@@ -1122,11 +1247,7 @@
                         undoStack.current.push([...itemsRef.current]);
                         setItems(next);
                         setStatus('Redone');
-                        api('save_items', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(denormalizeItems(next, schemaModeRef.current))
-                        }).then(() => setStatus('Saved (redo)')).catch(() => showErrorToast('Redo saved locally but failed to sync to server'));
+                        queueItemsSave(next, 'Saved (redo)');
                         return;
                     }
                     // E008: Arrow keys for inspector
@@ -1147,12 +1268,12 @@
                 };
                 window.addEventListener('keydown', handler);
                 return () => window.removeEventListener('keydown', handler);
-            }, [view, selectedItemId, filteredItems, showErrorToast]);
+            }, [view, selectedItemId, filteredItems, showErrorToast, itemsReady]);
 
             // --- COMPUTED DATA ---
 
             // Build hierarchical rule structure for sidebar
-            const ruleHierarchy = useMemo(() => {
+            const { ruleHierarchy, ruleByName } = useMemo(() => {
                 const ruleMap = new Map(); // key: rule_name, value: { number, name, subparts: Map, itemCount, generalItemCount }
 
                 items.forEach(item => {
@@ -1188,7 +1309,7 @@
                 });
 
                 // Convert to array and sort: numbered rules first, then alphabetical
-                return Array.from(ruleMap.values())
+                const hierarchy = Array.from(ruleMap.values())
                     .map(r => ({ ...r, subparts: Array.from(r.subparts.values()).sort((a, b) => (a.number || a.name).localeCompare(b.number || b.name, undefined, { numeric: true, sensitivity: 'base' })) }))
                     .sort((a, b) => {
                         if (a.number && !b.number) return -1;
@@ -1196,6 +1317,8 @@
                         if (a.number && b.number) return a.number.localeCompare(b.number, undefined, { numeric: true, sensitivity: 'base' });
                         return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
                     });
+
+                return { ruleHierarchy: hierarchy, ruleByName: ruleMap };
             }, [items]);
 
             // Filtered Items for Main View + search match map (computed together to avoid setState during render)
@@ -1271,24 +1394,13 @@
             // Helper to get Source info for an Item
             const getSourceForItem = (item) => {
                 if (!item || !item.id_source) return null;
-                return sources.find(s => s.id_source === item.id_source);
+                return sourceById.get(item.id_source);
             };
-
-            // E011: Rule count map for library card pills
-            const ruleCountMap = useMemo(() => {
-                const map = new Map();
-                items.forEach(item => {
-                    (item.rule_name || []).forEach(rn => {
-                        map.set(rn, (map.get(rn) || 0) + 1);
-                    });
-                });
-                return map;
-            }, [items]);
 
             // --- EDITORS ---
 
             const handleItemChange = (field, value) => {
-                if (!selectedItemId) return;
+                if (!selectedItemId || !itemsReady) return;
                 const newItems = items.map(i => i.id_item === selectedItemId ? { ...i, [field]: value } : i);
                 // Capture pre-edit state for undo (only on first keystroke in debounce window)
                 if (!inspectorSaveTimer.current) {
@@ -1305,20 +1417,13 @@
                     redoStack.current = [];
                     inspectorUndoSnapshot.current = null;
                     inspectorSaveTimer.current = null;
-                    // Persist to server (setItems already called, so just POST)
-                    setStatus('Saving Items...');
-                    api('save_items', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(denormalizeItems(newItems, schemaModeRef.current))
-                    }).then(() => setStatus('Saved')).catch(() => {
-                        setStatus('Save Error');
-                        showErrorToast('Failed to save items — server may be down');
-                    });
+                    // Persist through the central queue (setItems already ran).
+                    queueItemsSave(newItems);
                 }, 600);
             };
 
             const handleSourceChange = (id, field, value) => {
+                if (!sourcesReady) return;
                 const newSources = sources.map(s => s.id_source === id ? { ...s, [field]: value } : s);
                 // Immediate local update for responsive UI
                 setSources(newSources);
@@ -1326,20 +1431,13 @@
                 if (sourceSaveTimer.current) clearTimeout(sourceSaveTimer.current);
                 sourceSaveTimer.current = setTimeout(() => {
                     sourceSaveTimer.current = null;
-                    setStatus('Saving Sources...');
-                    api('save_sources', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(newSources)
-                    }).then(() => setStatus('Saved')).catch(() => {
-                        setStatus('Save Error');
-                        showErrorToast('Failed to save sources — server may be down');
-                    });
+                    queueSourcesSave(newSources);
                 }, 600);
             };
 
             // Bulk update rule name/number for all items with a specific rule_name
             const updateRuleForAll = (oldRuleName, newRuleName, newRuleNumber) => {
+                if (!itemsReady) return;
                 const newItems = items.map(item => {
                     if (!Array.isArray(item.rule_name) || !item.rule_name.includes(oldRuleName)) return item;
 
@@ -1357,15 +1455,18 @@
                 });
                 // Immediate local update for responsive UI
                 setItems(newItems);
-                // Debounced save to server (600ms)
-                if (ruleSaveTimer.current) clearTimeout(ruleSaveTimer.current);
-                ruleSaveTimer.current = setTimeout(() => {
-                    ruleSaveTimer.current = null;
-                    saveItems(itemsRef.current);
-                }, 600);
+                // Queue save on the closure-captured newItems — no debounce needed here
+                // because the save queue already coalesces rapid requests, and reading
+                // itemsRef.current inside a timer could race with concurrent Inspector edits.
+                queueItemsSave(newItems);
             };
 
             const createNewItem = () => {
+                if (!itemsReady) {
+                    showErrorToast('Create or open a valid items document before adding an item.');
+                    setStatus('Save Blocked');
+                    return;
+                }
                 const newId = crypto.randomUUID();
                 const newItem = {
                     ...ITEM_TEMPLATE,
@@ -1382,6 +1483,11 @@
             };
 
             const createNewSource = () => {
+                if (!sourcesReady) {
+                    showErrorToast('Create or open a valid sources document before adding a source.');
+                    setStatus('Save Blocked');
+                    return;
+                }
                 const newId = crypto.randomUUID();
                 const newSource = { ...SOURCE_TEMPLATE, id_source: newId, short_cite: "New Source" };
                 saveSources([...sources, newSource]);
@@ -1415,9 +1521,11 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ data: denormalizeItems(items, schemaMode) })
                     });
-                    const json = await res.json();
+                    const json = await readApiResponse(res);
                     if (json.status === 'success') {
                         setItemsFilename(json.filename);
+                        setItemsReady(true);
+                        setLoadError(null);
                         setStatus('Saved As ' + json.filename);
                     } else if (json.status === 'canceled') {
                         setStatus('Canceled');
@@ -1425,7 +1533,7 @@
                         showErrorToast('File picker unavailable (tkinter not installed)');
                         setStatus('Error');
                     }
-                } catch (e) { setStatus('Save Error'); showErrorToast('Save As failed'); }
+                } catch (e) { setStatus('Save Error'); showErrorToast(e.message || 'Save As failed'); }
             };
 
             const saveSourcesAs = async () => {
@@ -1436,9 +1544,11 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ data: sources })
                     });
-                    const json = await res.json();
+                    const json = await readApiResponse(res);
                     if (json.status === 'success') {
                         setSourcesFilename(json.filename);
+                        setSourcesReady(true);
+                        setLoadError(null);
                         setStatus('Saved As ' + json.filename);
                     } else if (json.status === 'canceled') {
                         setStatus('Canceled');
@@ -1446,7 +1556,7 @@
                         showErrorToast('File picker unavailable (tkinter not installed)');
                         setStatus('Error');
                     }
-                } catch (e) { setStatus('Save Error'); showErrorToast('Save As failed'); }
+                } catch (e) { setStatus('Save Error'); showErrorToast(e.message || 'Save As failed'); }
             };
 
             // --- RENDER HELPERS ---
@@ -2016,6 +2126,7 @@
                                     <button onClick={() => setView('draft')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'draft' ? 'bg-green-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Draft</button>
                                     <button onClick={() => setView('render')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'render' ? 'bg-amber-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Render</button>
                                     <button onClick={() => setView('sources')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'sources' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Sources</button>
+                                    <button onClick={() => setView('parser')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'parser' ? 'bg-orange-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Parser</button>
                                 </div>
                                 <div className="relative" ref={searchFieldsRef}>
                                     <Icon name="search" size={14} className="absolute left-3 top-2 text-slate-500" />
@@ -2182,8 +2293,11 @@
                                                                     setSchemaMode(mode);
                                                                     setItems([]);
                                                                     setSources([]);
+                                                                    setItemsReady(true);
+                                                                    setSourcesReady(true);
                                                                     setItemsFilename(d.items_filename || 'items.json');
                                                                     setSourcesFilename(d.sources_filename || 'sources.json');
+                                                                    setLoadError(null);
                                                                     setSelectedRule('__all__');
                                                                     setSelectedItemId(null);
                                                                     setView('library');
@@ -2209,6 +2323,17 @@
                                 )}
                             </div>
                         </div>
+
+                        {loadError && (
+                            <div role="alert" className="shrink-0 border-b border-red-800/70 bg-red-950/70 px-6 py-3 text-red-100 flex items-start gap-3">
+                                <Icon name="alert-triangle" size={18} className="text-red-400 shrink-0 mt-0.5" />
+                                <div className="min-w-0">
+                                    <div className="text-xs font-bold uppercase tracking-wide text-red-300">Document not loaded</div>
+                                    <div className="text-xs text-red-200/90 mt-0.5 break-all">{loadError}</div>
+                                    <div className="text-[10px] text-red-400/80 mt-1">The file was not changed. Open a valid document or create a new one.</div>
+                                </div>
+                            </div>
+                        )}
 
                         {/* Content area: Stage panel + views side by side, below navbar */}
                         <div className="flex-1 flex overflow-hidden min-h-0">
@@ -2441,7 +2566,7 @@
                                                         {item.rule_name && item.rule_name.map((rn, i) => (
                                                             <span key={i} className="text-[10px] bg-indigo-900/30 text-indigo-300 border border-indigo-800/40 px-1.5 py-0.5 rounded flex items-center gap-1">
                                                                 {rn}
-                                                                <span className="text-indigo-500/60 text-[8px]">({ruleCountMap.get(rn) || 0})</span>
+                                                                <span className="text-indigo-500/60 text-[8px]">({ruleByName.get(rn)?.itemCount || 0})</span>
                                                             </span>
                                                         ))}
                                                     </div>
@@ -2767,7 +2892,7 @@
                                                         Linked Source
                                                     </h2>
                                                     {(() => {
-                                                        const currentSource = sources.find(s => s.id_source === currentItem.id_source);
+                                                        const currentSource = sourceById.get(currentItem.id_source);
                                                         const filtered = srcQuery
                                                             ? sources.filter(s =>
                                                                 (s.short_cite || '').toLowerCase().includes(srcQuery.toLowerCase()) ||
@@ -3031,7 +3156,7 @@
                                     const sid = item.id_source;
                                     if (sid && !sourceMap.has(sid)) {
                                         sourceNum++;
-                                        const src = sources.find(s => s.id_source === sid);
+                                        const src = sourceById.get(sid);
                                         sourceMap.set(sid, { number: sourceNum, source: src, cite: item.short_cite || sid });
                                     }
                                 });
@@ -3327,7 +3452,8 @@
                                                         </button>
                                                         <button
                                                             onClick={() => {
-                                                                const newItems = [...items, ...parseResult.items];
+                                                                const importedItems = normalizeItems(parseResult.items, 'research');
+                                                                const newItems = [...items, ...importedItems];
                                                                 const existingSourceIds = new Set(sources.map(s => s.id_source));
                                                                 const newSources = [...sources, ...parseResult.sources.filter(s => !existingSourceIds.has(s.id_source))];
                                                                 saveItems(newItems);

@@ -2,7 +2,6 @@
 Scribity Server — py scribity_server.py
 
 """
-# py "scribity_server.py"
 
 import json
 import os
@@ -38,6 +37,11 @@ SOURCES_PATH = DEFAULT_SOURCES_PATH
 
 app = Flask(__name__)
 CORS(app)
+
+# Saves are allowed only after the corresponding document has loaded successfully
+# or has been created explicitly through a save/new-document action.
+ITEMS_READY = False
+SOURCES_READY = False
 
 # --- TEMPLATES BASED ON NEW SCHEMA ---
 
@@ -130,20 +134,72 @@ def normalize_items(data):
             item['contains_example'] = True
     return data
 
-def load_json(path, template, default_init=None):
-    """Generic JSON loader with template fallback"""
+class JsonDocumentError(Exception):
+    """A document could not be safely loaded as a Scribity JSON array."""
+
+    def __init__(self, kind, path, message, status_code):
+        super().__init__(message)
+        self.kind = kind
+        self.path = path
+        self.status_code = status_code
+
+
+def load_json(path):
+    """Load an existing Scribity JSON document without creating or repairing it."""
     if not os.path.exists(path):
-        print(f"Creating new file at: {path}")
-        data = default_init if default_init else []
-        save_json(path, data)
-        return data
-    
-    with open(path, 'r', encoding='utf-8') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"\n!!! JSON PARSE ERROR in {path}: {e}\n!!! Returning empty list — file may be corrupted!\n")
-            return []
+        raise JsonDocumentError(
+            "not_found",
+            path,
+            f"File not found: {path}",
+            404,
+        )
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as error:
+        raise JsonDocumentError(
+            "invalid_json",
+            path,
+            f"Invalid JSON in {os.path.basename(path)}: {error}",
+            422,
+        ) from error
+    except OSError as error:
+        raise JsonDocumentError(
+            "io_error",
+            path,
+            f"Could not read {path}: {error}",
+            500,
+        ) from error
+
+    if not isinstance(data, list):
+        raise JsonDocumentError(
+            "invalid_shape",
+            path,
+            f"{os.path.basename(path)} must contain a JSON array.",
+            422,
+        )
+    if any(not isinstance(entry, dict) for entry in data):
+        raise JsonDocumentError(
+            "invalid_shape",
+            path,
+            f"Every entry in {os.path.basename(path)} must be a JSON object.",
+            422,
+        )
+
+    return data
+
+
+def json_document_error_response(error, document):
+    """Return a consistent, user-readable API response for a load failure."""
+    return jsonify({
+        "status": "error",
+        "kind": error.kind,
+        "document": document,
+        "filename": os.path.basename(error.path),
+        "path": error.path,
+        "message": str(error),
+    }), error.status_code
 
 def save_json(path, data):
     """Generic JSON saver with atomic write to prevent corruption."""
@@ -196,11 +252,24 @@ def index():
 @app.route('/api/data', methods=['GET'])
 def get_all_data():
     """Returns both Items and Sources in one call"""
-    items = load_json(ITEMS_PATH, ITEM_TEMPLATE, default_init=[{**ITEM_TEMPLATE, "id_item": "1", "quote_original": "Welcome to the new system.", "rule_number": ["General"]}])
-    items = normalize_items(items)
-    sources = load_json(SOURCES_PATH, SOURCE_TEMPLATE, default_init=[{**SOURCE_TEMPLATE, "id_source": "src_1", "short_cite": "Manual, 2026", "title": "System Manual"}])
-    
+    global ITEMS_READY, SOURCES_READY
+    ITEMS_READY = False
+    SOURCES_READY = False
+
+    try:
+        items = normalize_items(load_json(ITEMS_PATH))
+    except JsonDocumentError as error:
+        return json_document_error_response(error, "items")
+
+    try:
+        sources = load_json(SOURCES_PATH)
+    except JsonDocumentError as error:
+        return json_document_error_response(error, "sources")
+
+    ITEMS_READY = True
+    SOURCES_READY = True
     return jsonify({
+        "status": "success",
         "items": items,
         "sources": sources,
         "items_filename": os.path.basename(ITEMS_PATH),
@@ -211,7 +280,7 @@ def get_all_data():
 
 @app.route('/api/open_items', methods=['POST'])
 def open_items_picker():
-    global ITEMS_PATH
+    global ITEMS_PATH, ITEMS_READY
     
     if not TK_AVAILABLE:
          return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
@@ -234,9 +303,10 @@ def open_items_picker():
         root.destroy()
 
         if file_path:
+            data = load_json(file_path)
             ITEMS_PATH = file_path
+            ITEMS_READY = True
             print(f"Switched Items file to: {ITEMS_PATH}")
-            data = load_json(ITEMS_PATH, ITEM_TEMPLATE)
             save_config()
             return jsonify({
                 "status": "success", 
@@ -246,13 +316,15 @@ def open_items_picker():
         else:
             return jsonify({"status": "canceled"})
 
+    except JsonDocumentError as error:
+        return json_document_error_response(error, "items")
     except Exception as e:
         print(e)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/open_sources', methods=['POST'])
 def open_sources_picker():
-    global SOURCES_PATH
+    global SOURCES_PATH, SOURCES_READY
     
     if not TK_AVAILABLE:
          return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
@@ -274,9 +346,10 @@ def open_sources_picker():
         root.destroy()
 
         if file_path:
+            data = load_json(file_path)
             SOURCES_PATH = file_path
+            SOURCES_READY = True
             print(f"Switched Sources file to: {SOURCES_PATH}")
-            data = load_json(SOURCES_PATH, SOURCE_TEMPLATE)
             save_config()
             return jsonify({
                 "status": "success", 
@@ -286,6 +359,8 @@ def open_sources_picker():
         else:
             return jsonify({"status": "canceled"})
 
+    except JsonDocumentError as error:
+        return json_document_error_response(error, "sources")
     except Exception as e:
         print(e)
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -294,41 +369,47 @@ def open_sources_picker():
 
 @app.route('/api/switch_items', methods=['POST'])
 def switch_items_manual():
-    global ITEMS_PATH
+    global ITEMS_PATH, ITEMS_READY
     try:
         new_path = request.json.get('path')
         if not new_path:
             return jsonify({"status": "error", "message": "No path provided"})
         
+        data = load_json(new_path)
         ITEMS_PATH = new_path
+        ITEMS_READY = True
         print(f"Switched Items file to: {ITEMS_PATH}")
-        data = load_json(ITEMS_PATH, ITEM_TEMPLATE)
         save_config()
         return jsonify({
             "status": "success", 
             "filename": os.path.basename(ITEMS_PATH),
             "data": data
         })
+    except JsonDocumentError as error:
+        return json_document_error_response(error, "items")
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/switch_sources', methods=['POST'])
 def switch_sources_manual():
-    global SOURCES_PATH
+    global SOURCES_PATH, SOURCES_READY
     try:
         new_path = request.json.get('path')
         if not new_path:
             return jsonify({"status": "error", "message": "No path provided"})
         
+        data = load_json(new_path)
         SOURCES_PATH = new_path
+        SOURCES_READY = True
         print(f"Switched Sources file to: {SOURCES_PATH}")
-        data = load_json(SOURCES_PATH, SOURCE_TEMPLATE)
         save_config()
         return jsonify({
             "status": "success", 
             "filename": os.path.basename(SOURCES_PATH),
             "data": data
         })
+    except JsonDocumentError as error:
+        return json_document_error_response(error, "sources")
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -336,6 +417,13 @@ def switch_sources_manual():
 
 @app.route('/api/save_items', methods=['POST'])
 def save_items_endpoint():
+    if not ITEMS_READY:
+        return jsonify({
+            "status": "error",
+            "kind": "document_not_ready",
+            "document": "items",
+            "message": "Items were not saved because no valid items document is loaded.",
+        }), 409
     try:
         new_data = request.json
         # Saves to whatever the current ITEMS_PATH is (default or user-selected)
@@ -346,6 +434,13 @@ def save_items_endpoint():
 
 @app.route('/api/save_sources', methods=['POST'])
 def save_sources_endpoint():
+    if not SOURCES_READY:
+        return jsonify({
+            "status": "error",
+            "kind": "document_not_ready",
+            "document": "sources",
+            "message": "Sources were not saved because no valid sources document is loaded.",
+        }), 409
     try:
         new_data = request.json
         # Saves to whatever the current SOURCES_PATH is (default or user-selected)
@@ -358,7 +453,7 @@ def save_sources_endpoint():
 
 @app.route('/api/save_items_as', methods=['POST'])
 def save_items_as():
-    global ITEMS_PATH
+    global ITEMS_PATH, ITEMS_READY
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
@@ -377,6 +472,7 @@ def save_items_as():
         if file_path:
             save_json(file_path, new_data)
             ITEMS_PATH = file_path
+            ITEMS_READY = True
             save_config()
             print(f"Saved Items As: {ITEMS_PATH}")
             return jsonify({"status": "success", "filename": os.path.basename(file_path)})
@@ -387,7 +483,7 @@ def save_items_as():
 
 @app.route('/api/save_sources_as', methods=['POST'])
 def save_sources_as():
-    global SOURCES_PATH
+    global SOURCES_PATH, SOURCES_READY
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
@@ -406,6 +502,7 @@ def save_sources_as():
         if file_path:
             save_json(file_path, new_data)
             SOURCES_PATH = file_path
+            SOURCES_READY = True
             save_config()
             print(f"Saved Sources As: {SOURCES_PATH}")
             return jsonify({"status": "success", "filename": os.path.basename(file_path)})
@@ -420,7 +517,7 @@ def save_sources_as():
 def new_document():
     """Open two save-as dialogs, write empty JSON arrays to both paths,
     then switch globals — both or neither (cancel-safe)."""
-    global ITEMS_PATH, SOURCES_PATH
+    global ITEMS_PATH, SOURCES_PATH, ITEMS_READY, SOURCES_READY
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
@@ -455,6 +552,8 @@ def new_document():
         save_json(sources_path, [])
         ITEMS_PATH   = items_path
         SOURCES_PATH = sources_path
+        ITEMS_READY = True
+        SOURCES_READY = True
         save_config()
         print(f"New empty document created — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
 
@@ -473,7 +572,7 @@ def new_document():
 def save_new_document():
     """Open two save dialogs, write both files, then update both globals.
     Globals only mutate if BOTH saves succeed — no split-state on cancel or error."""
-    global ITEMS_PATH, SOURCES_PATH
+    global ITEMS_PATH, SOURCES_PATH, ITEMS_READY, SOURCES_READY
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
@@ -513,6 +612,8 @@ def save_new_document():
         save_json(sources_path, sources_data)
         ITEMS_PATH   = items_path
         SOURCES_PATH = sources_path
+        ITEMS_READY = True
+        SOURCES_READY = True
         save_config()
         print(f"New document saved — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
 
