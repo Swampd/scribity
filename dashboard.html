@@ -318,7 +318,7 @@
 
         // --- RULE EDITOR COMPONENTS ---
 
-        const RuleRow = ({ index, ruleData, allRules, allItems, onDelete, onChange }) => {
+        const RuleRow = ({ index, ruleData, allRules, allItems, labels, onDelete, onChange }) => {
             const [isNewRule, setIsNewRule] = useState(false);
             const [isNewSubpart, setIsNewSubpart] = useState(false);
 
@@ -352,11 +352,11 @@
                     <div className="flex gap-2 items-start pr-6">
                         {/* Rule Name */}
                         <div className="flex-1">
-                            <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">{window.__schemaLabels?.rule || 'Rule'}</label>
+                            <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">{labels.rule}</label>
                             {isNewRule ? (
                                 <input
                                     className="custom-input text-xs"
-                                    placeholder={`New ${window.__schemaLabels?.rule || 'Rule'} Name`}
+                                    placeholder={`New ${labels.rule} Name`}
                                     value={currentRuleName}
                                     autoFocus
                                     onChange={(e) => onChange(index, 'name', e.target.value)}
@@ -371,9 +371,9 @@
                                         else onChange(index, 'name', e.target.value);
                                     }}
                                 >
-                                    <option value="">-- {window.__schemaLabels?.selectRule || 'Select Rule'} --</option>
+                                    <option value="">-- {labels.selectRule} --</option>
                                     {allRules.map(r => <option key={r.name} value={r.name}>{r.name}</option>)}
-                                    <option value="__NEW__" className="text-amber-400 font-bold">+ {window.__schemaLabels?.newRule || 'New Rule'}</option>
+                                    <option value="__NEW__" className="text-amber-400 font-bold">+ {labels.newRule}</option>
                                 </select>
                             )}
                         </div>
@@ -414,7 +414,7 @@
                                         else onChange(index, 'subpartName', e.target.value);
                                     }}
                                 >
-                                    <option value="">-- {currentRuleName ? 'Select Subpart' : `Select ${window.__schemaLabels?.rule || 'Rule'} First`} --</option>
+                                    <option value="">-- {currentRuleName ? 'Select Subpart' : `Select ${labels.rule} First`} --</option>
                                     {knownSubparts.map(s => <option key={s} value={s}>{s}</option>)}
                                     <option value="__NEW__" className="text-amber-400 font-bold">+ New Subpart</option>
                                 </select>
@@ -436,7 +436,7 @@
             );
         };
 
-        const RuleManager = ({ item, ruleHierarchy, allItems, onSave }) => {
+        const RuleManager = ({ item, ruleHierarchy, allItems, labels, onSave }) => {
             // Structure item data into rows for easier editing
             const rows = useMemo(() => {
                 const rNames = Array.isArray(item.rule_name) ? item.rule_name : [];
@@ -497,9 +497,9 @@
             return (
                 <div className="col-span-12 bg-slate-900 border border-slate-800 p-4 rounded-lg">
                     <div className="flex justify-between items-center mb-3">
-                        <label className="custom-label text-indigo-400 mb-0">Applied {window.__schemaLabels?.rules || 'Rules'}</label>
+                        <label className="custom-label text-indigo-400 mb-0">Applied {labels.rules}</label>
                         <button onClick={handleAdd} className="text-[10px] bg-indigo-900/50 hover:bg-indigo-800 text-indigo-300 px-2 py-1 rounded font-bold border border-indigo-700/50 flex items-center gap-1">
-                            <Icon name="plus" size={12} /> {window.__schemaLabels?.addRule || 'Add Another Rule'}
+                            <Icon name="plus" size={12} /> {labels.addRule}
                         </button>
                     </div>
                     <div className="space-y-3">
@@ -510,6 +510,7 @@
                                 ruleData={row}
                                 allRules={ruleHierarchy}
                                 allItems={allItems}
+                                labels={labels}
                                 onDelete={handleDelete}
                                 onChange={handleChange}
                             />
@@ -521,8 +522,7 @@
 
         // --- EXAMPLE MANAGER COMPONENT ---
 
-        const ExampleManager = ({ item, onSave }) => {
-            const labels = window.__schemaLabels || {};
+        const ExampleManager = ({ item, labels, onSave }) => {
             const examples = EXAMPLE_FIELDS.map((f, i) => ({
                 key: f,
                 noteKey: EXAMPLE_NOTE_FIELDS[i],
@@ -857,8 +857,6 @@
             const schemaModeRef = useRef(schemaMode);
             schemaModeRef.current = schemaMode;
             const labels = SCHEMA_LABELS[schemaMode];
-            // Expose labels to child components (RuleRow/RuleManager are defined outside App)
-            window.__schemaLabels = labels;
             const [stageRule, setStageRule] = useState(null); // rule pinned in Stage
             const [stageSubpart, setStageSubpart] = useState(null); // null = general only, '__all_rule__' = all, string = specific subpart
             const [sidebarEditMode, setSidebarEditMode] = useState(false);
@@ -2989,12 +2987,14 @@
                                                 item={items.find(i => i.id_item === selectedItemId)}
                                                 ruleHierarchy={ruleHierarchy}
                                                 allItems={items}
+                                                labels={labels}
                                                 onSave={(newItem) => saveItems(items.map(i => i.id_item === newItem.id_item ? newItem : i))}
                                             />
 
                                             {/* --- 4. EXAMPLES --- */}
                                             <ExampleManager
                                                 item={items.find(i => i.id_item === selectedItemId)}
+                                                labels={labels}
                                                 onSave={(newItem) => saveItems(items.map(i => i.id_item === newItem.id_item ? newItem : i))}
                                             />
 
