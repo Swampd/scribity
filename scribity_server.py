@@ -6,6 +6,8 @@ Scribity Server — py scribity_server.py
 import json
 import os
 import sys
+import tempfile
+import threading
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
@@ -42,6 +44,7 @@ CORS(app)
 # or has been created explicitly through a save/new-document action.
 ITEMS_READY = False
 SOURCES_READY = False
+SAVE_LOCK = threading.RLock()
 
 # --- TEMPLATES BASED ON NEW SCHEMA ---
 
@@ -203,13 +206,84 @@ def json_document_error_response(error, document):
 
 def save_json(path, data):
     """Generic JSON saver with atomic write to prevent corruption."""
-    tmp_path = path + '.tmp'
-    with open(tmp_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    # Atomic rename (overwrites existing file)
-    os.replace(tmp_path, path)
+    with SAVE_LOCK:
+        tmp_path = path + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        # Atomic rename (overwrites existing file)
+        os.replace(tmp_path, path)
+
+
+def stage_json(path, data):
+    """Write JSON to a unique temporary file beside its destination."""
+    directory = os.path.dirname(os.path.abspath(path))
+    prefix = f".{os.path.basename(path)}."
+    fd, tmp_path = tempfile.mkstemp(prefix=prefix, suffix='.tmp', dir=directory)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return tmp_path
+
+
+def save_json_pair(items_path, items_data, sources_path, sources_data):
+    """Commit two document snapshots together, restoring items if sources fail."""
+    if os.path.realpath(items_path) == os.path.realpath(sources_path):
+        raise ValueError("Items and sources must use different files.")
+
+    with SAVE_LOCK:
+        original_items = load_json(items_path)
+        load_json(sources_path)
+        staged_items = None
+        staged_sources = None
+        items_backup = None
+        preserve_items_backup = False
+
+        try:
+            staged_items = stage_json(items_path, items_data)
+            staged_sources = stage_json(sources_path, sources_data)
+            items_backup = stage_json(items_path, original_items)
+            os.replace(staged_items, items_path)
+            staged_items = None
+            try:
+                os.replace(staged_sources, sources_path)
+                staged_sources = None
+            except Exception as commit_error:
+                try:
+                    os.replace(items_backup, items_path)
+                    items_backup = None
+                except Exception as rollback_error:
+                    preserve_items_backup = True
+                    raise RuntimeError(
+                        f"Sources save failed and items rollback also failed; "
+                        f"the items backup remains at {items_backup}: {rollback_error}"
+                    ) from commit_error
+                raise
+        finally:
+            cleanup_paths = (
+                staged_items,
+                staged_sources,
+                None if preserve_items_backup else items_backup,
+            )
+            for tmp_path in cleanup_paths:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
 def load_config():
     """Load machine-local Scribity settings, falling back to portable defaults."""
@@ -448,6 +522,44 @@ def save_sources_endpoint():
         return jsonify({"status": "success", "message": "Sources saved"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/api/append_import', methods=['POST'])
+def append_import():
+    """Persist the post-import item and source snapshots as one operation."""
+    if not ITEMS_READY or not SOURCES_READY:
+        return jsonify({
+            "status": "error",
+            "kind": "document_not_ready",
+            "message": "Open valid items and sources documents before appending an import.",
+        }), 409
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"status": "error", "message": "Expected a JSON object."}), 400
+
+    items_data = payload.get('items')
+    sources_data = payload.get('sources')
+    for name, data in (("items", items_data), ("sources", sources_data)):
+        if not isinstance(data, list) or any(not isinstance(entry, dict) for entry in data):
+            return jsonify({
+                "status": "error",
+                "kind": "invalid_shape",
+                "message": f"{name.capitalize()} must be a JSON array of objects.",
+            }), 422
+
+    try:
+        save_json_pair(ITEMS_PATH, items_data, SOURCES_PATH, sources_data)
+        return jsonify({
+            "status": "success",
+            "message": "Import appended",
+            "items_count": len(items_data),
+            "sources_count": len(sources_data),
+        })
+    except (JsonDocumentError, ValueError) as error:
+        return jsonify({"status": "error", "message": str(error)}), 409
+    except Exception as error:
+        return jsonify({"status": "error", "message": str(error)}), 500
 
 # --- SAVE AS ENDPOINTS ---
 

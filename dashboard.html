@@ -978,6 +978,7 @@
             // DRR Parser state
             const [parseResult, setParseResult] = useState(null);
             const [parseLoading, setParseLoading] = useState(false);
+            const [parseSaving, setParseSaving] = useState(false);
             const [parseError, setParseError] = useState(null);
 
             // Source search combobox state
@@ -3451,20 +3452,43 @@
                                                             <Icon name="file-plus" size={14} /> Save to New File
                                                         </button>
                                                         <button
-                                                            onClick={() => {
+                                                            disabled={parseSaving}
+                                                            onClick={async () => {
                                                                 const importedItems = normalizeItems(parseResult.items, 'research');
                                                                 const newItems = [...items, ...importedItems];
                                                                 const existingSourceIds = new Set(sources.map(s => s.id_source));
                                                                 const newSources = [...sources, ...parseResult.sources.filter(s => !existingSourceIds.has(s.id_source))];
-                                                                saveItems(newItems);
-                                                                saveSources(newSources);
-                                                                setParseResult(null);
-                                                                setView('library');
-                                                                setStatus('Appended to current file');
+                                                                setParseSaving(true);
+                                                                setParseError(null);
+                                                                setStatus('Appending import...');
+                                                                try {
+                                                                    const response = await api('append_import', {
+                                                                        method: 'POST',
+                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                        body: JSON.stringify({
+                                                                            items: denormalizeItems(newItems, schemaModeRef.current),
+                                                                            sources: newSources,
+                                                                        }),
+                                                                    });
+                                                                    await readApiResponse(response);
+                                                                    undoStack.current.push([...itemsRef.current]);
+                                                                    if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
+                                                                    redoStack.current = [];
+                                                                    setItems(newItems);
+                                                                    setSources(newSources);
+                                                                    setParseResult(null);
+                                                                    setView('library');
+                                                                    setStatus('Appended to current file');
+                                                                } catch (error) {
+                                                                    setParseError(`Append failed: ${error.message || 'Unable to save the import'}`);
+                                                                    setStatus('Append Error');
+                                                                } finally {
+                                                                    setParseSaving(false);
+                                                                }
                                                             }}
-                                                            className="bg-green-700 hover:bg-green-600 text-white px-4 py-1.5 rounded font-bold text-xs flex items-center gap-2 transition-colors"
+                                                            className="bg-green-700 hover:bg-green-600 text-white px-4 py-1.5 rounded font-bold text-xs flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                                         >
-                                                            <Icon name="download" size={14} /> Append to Current
+                                                            <Icon name="download" size={14} /> {parseSaving ? 'Appending...' : 'Append to Current'}
                                                         </button>
                                                     </div>
                                                 </div>

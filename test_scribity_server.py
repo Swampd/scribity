@@ -3,6 +3,7 @@ import inspect
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import scribity_server as server
 
@@ -154,6 +155,91 @@ class JsonRouteSafetyTests(ScribityServerTestCase):
             json=[{"id_item": "saved"}],
         )
         self.assertEqual(save_response.status_code, 200)
+
+
+class ParserAppendSaveTests(ScribityServerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.original_items = [{"id_item": "existing"}]
+        self.original_sources = [{"id_source": "existing-source"}]
+        server.ITEMS_PATH = self.write_json("items.json", self.original_items)
+        server.SOURCES_PATH = self.write_json("sources.json", self.original_sources)
+        server.ITEMS_READY = True
+        server.SOURCES_READY = True
+
+    def read_json(self, path):
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_append_import_saves_both_completed_snapshots(self):
+        new_items = self.original_items + [{"id_item": "imported"}]
+        new_sources = self.original_sources + [{"id_source": "imported-source"}]
+
+        response = self.client.post(
+            "/api/append_import",
+            json={"items": new_items, "sources": new_sources},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "success")
+        self.assertEqual(self.read_json(server.ITEMS_PATH), new_items)
+        self.assertEqual(self.read_json(server.SOURCES_PATH), new_sources)
+
+    def test_append_import_restores_items_when_sources_commit_fails(self):
+        new_items = self.original_items + [{"id_item": "imported"}]
+        new_sources = self.original_sources + [{"id_source": "imported-source"}]
+        real_replace = os.replace
+        source_commit_failed = False
+
+        def fail_first_source_commit(source, destination):
+            nonlocal source_commit_failed
+            if destination == server.SOURCES_PATH and not source_commit_failed:
+                source_commit_failed = True
+                raise OSError("simulated sources write failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(server.os, "replace", side_effect=fail_first_source_commit):
+            response = self.client.post(
+                "/api/append_import",
+                json={"items": new_items, "sources": new_sources},
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["status"], "error")
+        self.assertEqual(self.read_json(server.ITEMS_PATH), self.original_items)
+        self.assertEqual(self.read_json(server.SOURCES_PATH), self.original_sources)
+
+    def test_append_import_retains_backup_when_rollback_also_fails(self):
+        new_items = self.original_items + [{"id_item": "imported"}]
+        new_sources = self.original_sources + [{"id_source": "imported-source"}]
+        real_replace = os.replace
+        item_commit_count = 0
+
+        def fail_source_commit_and_items_rollback(source, destination):
+            nonlocal item_commit_count
+            if destination == server.SOURCES_PATH:
+                raise OSError("simulated sources write failure")
+            if destination == server.ITEMS_PATH:
+                item_commit_count += 1
+                if item_commit_count == 2:
+                    raise OSError("simulated rollback failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(
+            server.os,
+            "replace",
+            side_effect=fail_source_commit_and_items_rollback,
+        ):
+            response = self.client.post(
+                "/api/append_import",
+                json={"items": new_items, "sources": new_sources},
+            )
+
+        self.assertEqual(response.status_code, 500)
+        message = response.get_json()["message"]
+        backup_path = message.split(" remains at ", 1)[1].rsplit(": ", 1)[0]
+        self.assertTrue(os.path.exists(backup_path))
+        os.unlink(backup_path)
 
 
 if __name__ == "__main__":
