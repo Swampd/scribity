@@ -157,6 +157,90 @@ class JsonRouteSafetyTests(ScribityServerTestCase):
         self.assertEqual(save_response.status_code, 200)
 
 
+class SavePayloadValidationTests(ScribityServerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.original_items = [{"id_item": "existing"}]
+        self.original_sources = [{"id_source": "existing-source"}]
+        server.ITEMS_PATH = self.write_json("items.json", self.original_items)
+        server.SOURCES_PATH = self.write_json("sources.json", self.original_sources)
+        server.ITEMS_READY = True
+        server.SOURCES_READY = True
+
+    def read_json(self, path):
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def post_json_value(self, route, value):
+        return self.client.post(
+            route,
+            data=json.dumps(value),
+            content_type="application/json",
+        )
+
+    def assert_invalid_shape(self, response, document):
+        self.assertEqual(response.status_code, 422)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["kind"], "invalid_shape")
+        self.assertEqual(payload["document"], document)
+
+    def test_direct_save_endpoints_reject_invalid_shapes_without_writing(self):
+        cases = (
+            ("/api/save_items", "items", "ITEMS_PATH", self.original_items),
+            ("/api/save_sources", "sources", "SOURCES_PATH", self.original_sources),
+        )
+        invalid_values = (None, {"unexpected": "object"}, ["scalar"])
+
+        for route, document, path_name, original_data in cases:
+            for invalid_value in invalid_values:
+                with self.subTest(route=route, invalid_value=invalid_value):
+                    response = self.post_json_value(route, invalid_value)
+
+                    self.assert_invalid_shape(response, document)
+                    self.assertEqual(self.read_json(getattr(server, path_name)), original_data)
+
+    def test_save_as_endpoints_validate_before_opening_a_dialog(self):
+        cases = (
+            ("/api/save_items_as", "items", "ITEMS_PATH"),
+            ("/api/save_sources_as", "sources", "SOURCES_PATH"),
+        )
+
+        for route, document, path_name in cases:
+            original_path = getattr(server, path_name)
+            with self.subTest(route=route), \
+                    mock.patch.object(server, "TK_AVAILABLE", True), \
+                    mock.patch.object(server, "tk", create=True) as tk_module, \
+                    mock.patch.object(server, "filedialog", create=True) as file_dialog:
+                response = self.client.post(route, json={"data": [17]})
+
+                self.assert_invalid_shape(response, document)
+                tk_module.Tk.assert_not_called()
+                file_dialog.asksaveasfilename.assert_not_called()
+                self.assertEqual(getattr(server, path_name), original_path)
+
+    def test_save_new_document_validates_both_documents_before_dialogs_or_writes(self):
+        cases = (
+            ({"items": None, "sources": self.original_sources}, "items"),
+            ({"items": self.original_items, "sources": [False]}, "sources"),
+        )
+
+        for payload, document in cases:
+            with self.subTest(document=document), \
+                    mock.patch.object(server, "TK_AVAILABLE", True), \
+                    mock.patch.object(server, "tk", create=True) as tk_module, \
+                    mock.patch.object(server, "filedialog", create=True) as file_dialog:
+                response = self.client.post("/api/save_new_document", json=payload)
+
+                self.assert_invalid_shape(response, document)
+                tk_module.Tk.assert_not_called()
+                file_dialog.asksaveasfilename.assert_not_called()
+                self.assertEqual(server.ITEMS_PATH, self.path("items.json"))
+                self.assertEqual(server.SOURCES_PATH, self.path("sources.json"))
+                self.assertEqual(self.read_json(server.ITEMS_PATH), self.original_items)
+                self.assertEqual(self.read_json(server.SOURCES_PATH), self.original_sources)
+
+
 class ParserAppendSaveTests(ScribityServerTestCase):
     def setUp(self):
         super().setUp()
@@ -240,6 +324,37 @@ class ParserAppendSaveTests(ScribityServerTestCase):
         backup_path = message.split(" remains at ", 1)[1].rsplit(": ", 1)[0]
         self.assertTrue(os.path.exists(backup_path))
         os.unlink(backup_path)
+
+
+class ServerStartupConfigurationTests(unittest.TestCase):
+    def test_normal_launch_disables_debugger_and_reloader(self):
+        options_builder = getattr(server, "server_run_options", None)
+
+        self.assertIsNotNone(options_builder)
+        self.assertEqual(
+            options_builder({}),
+            {"port": server.PORT, "debug": False, "use_reloader": False},
+        )
+
+    def test_debug_environment_flag_enables_development_mode(self):
+        options_builder = getattr(server, "server_run_options", None)
+
+        self.assertIsNotNone(options_builder)
+        for flag in ("1", "true", "yes", "on", " TRUE "):
+            with self.subTest(flag=flag):
+                self.assertEqual(
+                    options_builder({"SCRIBITY_DEBUG": flag}),
+                    {"port": server.PORT, "debug": True, "use_reloader": True},
+                )
+
+    def test_unrecognized_debug_value_stays_disabled(self):
+        options_builder = getattr(server, "server_run_options", None)
+
+        self.assertIsNotNone(options_builder)
+        self.assertEqual(
+            options_builder({"SCRIBITY_DEBUG": "sometimes"}),
+            {"port": server.PORT, "debug": False, "use_reloader": False},
+        )
 
 
 if __name__ == "__main__":

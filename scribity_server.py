@@ -30,6 +30,18 @@ BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 HTML_PATH = os.path.join(BASE_DIR, HTML_FILE)
 CONFIG_PATH = os.path.join(BASE_DIR, 'scribity_config.json')
 
+
+def server_run_options(environ=None):
+    """Return Flask launch options, with development mode explicitly opt-in."""
+    environment = os.environ if environ is None else environ
+    debug_value = str(environment.get('SCRIBITY_DEBUG', '')).strip().lower()
+    debug_enabled = debug_value in {'1', 'true', 'yes', 'on'}
+    return {
+        'port': PORT,
+        'debug': debug_enabled,
+        'use_reloader': debug_enabled,
+    }
+
 # Default file paths — relative to the server script.
 # Use the file picker (Items/Sources buttons) to load a different file.
 DEFAULT_ITEMS_PATH   = os.path.join(BASE_DIR, 'items.json')
@@ -147,6 +159,21 @@ class JsonDocumentError(Exception):
         self.status_code = status_code
 
 
+class JsonDocumentShapeError(ValueError):
+    """A value is not a Scribity document represented as an array of objects."""
+
+
+def validate_document_structure(data, label="Document"):
+    """Return data when it is a JSON-style array of objects, otherwise raise."""
+    if not isinstance(data, list):
+        raise JsonDocumentShapeError(f"{label} must be a JSON array.")
+    if any(not isinstance(entry, dict) for entry in data):
+        raise JsonDocumentShapeError(
+            f"Every entry in {label.lower()} must be a JSON object."
+        )
+    return data
+
+
 def load_json(path):
     """Load an existing Scribity JSON document without creating or repairing it."""
     if not os.path.exists(path):
@@ -175,20 +202,15 @@ def load_json(path):
             500,
         ) from error
 
-    if not isinstance(data, list):
+    try:
+        validate_document_structure(data, os.path.basename(path))
+    except JsonDocumentShapeError as error:
         raise JsonDocumentError(
             "invalid_shape",
             path,
-            f"{os.path.basename(path)} must contain a JSON array.",
+            str(error),
             422,
-        )
-    if any(not isinstance(entry, dict) for entry in data):
-        raise JsonDocumentError(
-            "invalid_shape",
-            path,
-            f"Every entry in {os.path.basename(path)} must be a JSON object.",
-            422,
-        )
+        ) from error
 
     return data
 
@@ -203,6 +225,16 @@ def json_document_error_response(error, document):
         "path": error.path,
         "message": str(error),
     }), error.status_code
+
+
+def invalid_document_shape_response(error, document):
+    """Return a consistent response when a save payload is structurally unsafe."""
+    return jsonify({
+        "status": "error",
+        "kind": "invalid_shape",
+        "document": document,
+        "message": str(error),
+    }), 422
 
 def save_json(path, data):
     """Generic JSON saver with atomic write to prevent corruption."""
@@ -498,8 +530,12 @@ def save_items_endpoint():
             "document": "items",
             "message": "Items were not saved because no valid items document is loaded.",
         }), 409
+    new_data = request.get_json(silent=True)
     try:
-        new_data = request.json
+        validate_document_structure(new_data, "Items")
+    except JsonDocumentShapeError as error:
+        return invalid_document_shape_response(error, "items")
+    try:
         # Saves to whatever the current ITEMS_PATH is (default or user-selected)
         save_json(ITEMS_PATH, new_data)
         return jsonify({"status": "success", "message": "Items saved"})
@@ -515,8 +551,12 @@ def save_sources_endpoint():
             "document": "sources",
             "message": "Sources were not saved because no valid sources document is loaded.",
         }), 409
+    new_data = request.get_json(silent=True)
     try:
-        new_data = request.json
+        validate_document_structure(new_data, "Sources")
+    except JsonDocumentShapeError as error:
+        return invalid_document_shape_response(error, "sources")
+    try:
         # Saves to whatever the current SOURCES_PATH is (default or user-selected)
         save_json(SOURCES_PATH, new_data)
         return jsonify({"status": "success", "message": "Sources saved"})
@@ -541,12 +581,10 @@ def append_import():
     items_data = payload.get('items')
     sources_data = payload.get('sources')
     for name, data in (("items", items_data), ("sources", sources_data)):
-        if not isinstance(data, list) or any(not isinstance(entry, dict) for entry in data):
-            return jsonify({
-                "status": "error",
-                "kind": "invalid_shape",
-                "message": f"{name.capitalize()} must be a JSON array of objects.",
-            }), 422
+        try:
+            validate_document_structure(data, name.capitalize())
+        except JsonDocumentShapeError as error:
+            return invalid_document_shape_response(error, name)
 
     try:
         save_json_pair(ITEMS_PATH, items_data, SOURCES_PATH, sources_data)
@@ -566,10 +604,15 @@ def append_import():
 @app.route('/api/save_items_as', methods=['POST'])
 def save_items_as():
     global ITEMS_PATH, ITEMS_READY
+    payload = request.get_json(silent=True)
+    new_data = payload.get('data') if isinstance(payload, dict) else None
+    try:
+        validate_document_structure(new_data, "Items")
+    except JsonDocumentShapeError as error:
+        return invalid_document_shape_response(error, "items")
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
-        new_data = request.json.get('data', [])
         root = tk.Tk()
         root.withdraw()
         root.wm_attributes('-topmost', 1)
@@ -596,10 +639,15 @@ def save_items_as():
 @app.route('/api/save_sources_as', methods=['POST'])
 def save_sources_as():
     global SOURCES_PATH, SOURCES_READY
+    payload = request.get_json(silent=True)
+    new_data = payload.get('data') if isinstance(payload, dict) else None
+    try:
+        validate_document_structure(new_data, "Sources")
+    except JsonDocumentShapeError as error:
+        return invalid_document_shape_response(error, "sources")
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
-        new_data = request.json.get('data', [])
         root = tk.Tk()
         root.withdraw()
         root.wm_attributes('-topmost', 1)
@@ -685,12 +733,17 @@ def save_new_document():
     """Open two save dialogs, write both files, then update both globals.
     Globals only mutate if BOTH saves succeed — no split-state on cancel or error."""
     global ITEMS_PATH, SOURCES_PATH, ITEMS_READY, SOURCES_READY
+    payload = request.get_json(silent=True)
+    items_data = payload.get('items') if isinstance(payload, dict) else None
+    sources_data = payload.get('sources') if isinstance(payload, dict) else None
+    for name, data in (("items", items_data), ("sources", sources_data)):
+        try:
+            validate_document_structure(data, name.capitalize())
+        except JsonDocumentShapeError as error:
+            return invalid_document_shape_response(error, name)
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
-        items_data  = request.json.get('items',   [])
-        sources_data = request.json.get('sources', [])
-
         root = tk.Tk()
         root.withdraw()
         root.wm_attributes('-topmost', 1)
@@ -800,4 +853,4 @@ if __name__ == '__main__':
         print("DRR Parser: Available")
     else:
         print("DRR Parser: NOT FOUND (parse_drr.py missing)")
-    app.run(port=PORT, debug=True)
+    app.run(**server_run_options())
