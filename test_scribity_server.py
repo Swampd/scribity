@@ -241,6 +241,174 @@ class SavePayloadValidationTests(ScribityServerTestCase):
                 self.assertEqual(self.read_json(server.SOURCES_PATH), self.original_sources)
 
 
+class TwoFileCreationSafetyTests(ScribityServerTestCase):
+    def setUp(self):
+        super().setUp()
+        server.ITEMS_READY = True
+        server.SOURCES_READY = True
+        self.active_items_path = server.ITEMS_PATH
+        self.active_sources_path = server.SOURCES_PATH
+
+    def post_with_dialog_paths(self, route, payload, items_path, sources_path):
+        with mock.patch.object(server, "TK_AVAILABLE", True), \
+                mock.patch.object(server, "tk", create=True), \
+                mock.patch.object(server, "filedialog", create=True) as file_dialog:
+            file_dialog.asksaveasfilename.side_effect = [items_path, sources_path]
+            return self.client.post(route, json=payload)
+
+    def assert_active_paths_unchanged(self):
+        self.assertEqual(server.ITEMS_PATH, self.active_items_path)
+        self.assertEqual(server.SOURCES_PATH, self.active_sources_path)
+
+    def test_creation_routes_reject_the_same_canonical_path_without_writing(self):
+        cases = (
+            ("/api/new_document", {}, "new-document-same.json"),
+            (
+                "/api/save_new_document",
+                {"items": [{"id_item": "new"}], "sources": [{"id_source": "new"}]},
+                "save-new-same.json",
+            ),
+        )
+
+        for route, payload, filename in cases:
+            target = self.path(filename)
+            equivalent_target = os.path.join(self.temp_dir.name, ".", filename)
+            with self.subTest(route=route):
+                response = self.post_with_dialog_paths(
+                    route,
+                    payload,
+                    target,
+                    equivalent_target,
+                )
+
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.get_json()["kind"], "path_conflict")
+                self.assertFalse(os.path.exists(target))
+                self.assert_active_paths_unchanged()
+
+    def test_creation_routes_commit_both_documents_before_updating_active_paths(self):
+        cases = (
+            ("/api/new_document", {}, [], []),
+            (
+                "/api/save_new_document",
+                {"items": [{"id_item": "new"}], "sources": [{"id_source": "new"}]},
+                [{"id_item": "new"}],
+                [{"id_source": "new"}],
+            ),
+        )
+
+        for index, (route, payload, expected_items, expected_sources) in enumerate(cases):
+            items_target = self.path(f"successful-items-{index}.json")
+            sources_target = self.path(f"successful-sources-{index}.json")
+            with self.subTest(route=route):
+                response = self.post_with_dialog_paths(
+                    route,
+                    payload,
+                    items_target,
+                    sources_target,
+                )
+
+                self.assertEqual(response.status_code, 200)
+                with open(items_target, "r", encoding="utf-8") as handle:
+                    self.assertEqual(json.load(handle), expected_items)
+                with open(sources_target, "r", encoding="utf-8") as handle:
+                    self.assertEqual(json.load(handle), expected_sources)
+                self.assertEqual(server.ITEMS_PATH, items_target)
+                self.assertEqual(server.SOURCES_PATH, sources_target)
+
+            server.ITEMS_PATH = self.active_items_path
+            server.SOURCES_PATH = self.active_sources_path
+
+    def test_new_document_removes_first_new_file_when_second_commit_fails(self):
+        items_target = self.path("new-items.json")
+        sources_target = self.path("new-sources.json")
+        real_replace = os.replace
+        source_commit_failed = False
+
+        def fail_first_source_commit(source, destination):
+            nonlocal source_commit_failed
+            if destination == sources_target and not source_commit_failed:
+                source_commit_failed = True
+                raise OSError("simulated sources write failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(server.os, "replace", side_effect=fail_first_source_commit):
+            response = self.post_with_dialog_paths(
+                "/api/new_document",
+                {},
+                items_target,
+                sources_target,
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(os.path.exists(items_target))
+        self.assertFalse(os.path.exists(sources_target))
+        self.assert_active_paths_unchanged()
+
+    def test_save_new_document_restores_existing_first_file_on_second_commit_failure(self):
+        original_items = '[ { "id_item": "original formatting" } ]\n'
+        original_sources = '[ { "id_source": "original source" } ]\n'
+        items_target = self.write_text("destination-items.json", original_items)
+        sources_target = self.write_text("destination-sources.json", original_sources)
+        real_replace = os.replace
+        source_commit_failed = False
+
+        def fail_first_source_commit(source, destination):
+            nonlocal source_commit_failed
+            if destination == sources_target and not source_commit_failed:
+                source_commit_failed = True
+                raise OSError("simulated sources write failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(server.os, "replace", side_effect=fail_first_source_commit):
+            response = self.post_with_dialog_paths(
+                "/api/save_new_document",
+                {
+                    "items": [{"id_item": "replacement"}],
+                    "sources": [{"id_source": "replacement"}],
+                },
+                items_target,
+                sources_target,
+            )
+
+        self.assertEqual(response.status_code, 500)
+        with open(items_target, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), original_items)
+        with open(sources_target, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), original_sources)
+        self.assert_active_paths_unchanged()
+
+    def test_both_documents_are_staged_before_either_destination_changes(self):
+        original_items = '[{"id_item": "untouched"}]\n'
+        original_sources = '[{"id_source": "untouched"}]\n'
+        items_target = self.write_text("staged-items.json", original_items)
+        sources_target = self.write_text("staged-sources.json", original_sources)
+        real_stage_json = server.stage_json
+
+        def fail_sources_staging(path, data):
+            if path == sources_target:
+                raise OSError("simulated sources staging failure")
+            return real_stage_json(path, data)
+
+        with mock.patch.object(server, "stage_json", side_effect=fail_sources_staging):
+            response = self.post_with_dialog_paths(
+                "/api/save_new_document",
+                {
+                    "items": [{"id_item": "replacement"}],
+                    "sources": [{"id_source": "replacement"}],
+                },
+                items_target,
+                sources_target,
+            )
+
+        self.assertEqual(response.status_code, 500)
+        with open(items_target, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), original_items)
+        with open(sources_target, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), original_sources)
+        self.assert_active_paths_unchanged()
+
+
 class ParserAppendSaveTests(ScribityServerTestCase):
     def setUp(self):
         super().setUp()

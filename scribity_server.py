@@ -5,6 +5,7 @@ Scribity Server — py scribity_server.py
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -271,14 +272,61 @@ def stage_json(path, data):
     return tmp_path
 
 
-def save_json_pair(items_path, items_data, sources_path, sources_data):
-    """Commit two document snapshots together, restoring items if sources fail."""
-    if os.path.realpath(items_path) == os.path.realpath(sources_path):
+def paths_refer_to_same_file(first_path, second_path):
+    """Return whether two selected paths resolve to the same destination."""
+    first_canonical = os.path.normcase(os.path.realpath(os.path.abspath(first_path)))
+    second_canonical = os.path.normcase(os.path.realpath(os.path.abspath(second_path)))
+    if first_canonical == second_canonical:
+        return True
+    try:
+        return os.path.samefile(first_path, second_path)
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def stage_file_backup(path):
+    """Copy an existing destination byte-for-byte to a temporary sibling file."""
+    directory = os.path.dirname(os.path.abspath(path))
+    prefix = f".{os.path.basename(path)}."
+    fd, backup_path = tempfile.mkstemp(prefix=prefix, suffix='.backup', dir=directory)
+    try:
+        with open(path, 'rb') as source, os.fdopen(fd, 'wb') as backup:
+            shutil.copyfileobj(source, backup)
+            backup.flush()
+            os.fsync(backup.fileno())
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(backup_path)
+        except OSError:
+            pass
+        raise
+    return backup_path
+
+
+def save_json_pair(
+    items_path,
+    items_data,
+    sources_path,
+    sources_data,
+    *,
+    require_existing_valid=False,
+):
+    """Stage and commit two documents, rolling items back if sources fail."""
+    validate_document_structure(items_data, "Items")
+    validate_document_structure(sources_data, "Sources")
+    if paths_refer_to_same_file(items_path, sources_path):
         raise ValueError("Items and sources must use different files.")
 
     with SAVE_LOCK:
-        original_items = load_json(items_path)
-        load_json(sources_path)
+        if require_existing_valid:
+            load_json(items_path)
+            load_json(sources_path)
+
+        items_existed = os.path.exists(items_path)
         staged_items = None
         staged_sources = None
         items_backup = None
@@ -287,7 +335,9 @@ def save_json_pair(items_path, items_data, sources_path, sources_data):
         try:
             staged_items = stage_json(items_path, items_data)
             staged_sources = stage_json(sources_path, sources_data)
-            items_backup = stage_json(items_path, original_items)
+            if items_existed:
+                items_backup = stage_file_backup(items_path)
+
             os.replace(staged_items, items_path)
             staged_items = None
             try:
@@ -295,13 +345,21 @@ def save_json_pair(items_path, items_data, sources_path, sources_data):
                 staged_sources = None
             except Exception as commit_error:
                 try:
-                    os.replace(items_backup, items_path)
-                    items_backup = None
+                    if items_existed:
+                        os.replace(items_backup, items_path)
+                        items_backup = None
+                    else:
+                        os.unlink(items_path)
                 except Exception as rollback_error:
-                    preserve_items_backup = True
+                    if items_backup:
+                        preserve_items_backup = True
+                        raise RuntimeError(
+                            f"Sources save failed and items rollback also failed; "
+                            f"the items backup remains at {items_backup}: {rollback_error}"
+                        ) from commit_error
                     raise RuntimeError(
-                        f"Sources save failed and items rollback also failed; "
-                        f"the items backup remains at {items_backup}: {rollback_error}"
+                        f"Sources save failed and removal of the newly-created items file "
+                        f"also failed; it may remain at {items_path}: {rollback_error}"
                     ) from commit_error
                 raise
         finally:
@@ -587,7 +645,13 @@ def append_import():
             return invalid_document_shape_response(error, name)
 
     try:
-        save_json_pair(ITEMS_PATH, items_data, SOURCES_PATH, sources_data)
+        save_json_pair(
+            ITEMS_PATH,
+            items_data,
+            SOURCES_PATH,
+            sources_data,
+            require_existing_valid=True,
+        )
         return jsonify({
             "status": "success",
             "message": "Import appended",
@@ -707,9 +771,8 @@ def new_document():
         if not sources_path:
             return jsonify({"status": "canceled"})
 
-        # Write empty arrays, then update globals
-        save_json(items_path,   [])
-        save_json(sources_path, [])
+        # Commit both empty documents, then update globals.
+        save_json_pair(items_path, [], sources_path, [])
         ITEMS_PATH   = items_path
         SOURCES_PATH = sources_path
         ITEMS_READY = True
@@ -722,6 +785,12 @@ def new_document():
             "items_filename":   os.path.basename(items_path),
             "sources_filename": os.path.basename(sources_path)
         })
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "kind": "path_conflict",
+            "message": str(e),
+        }), 409
     except Exception as e:
         print(e)
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -772,9 +841,8 @@ def save_new_document():
         if not sources_path:
             return jsonify({"status": "canceled"})
 
-        # Both paths confirmed — write files, THEN update globals
-        save_json(items_path,   items_data)
-        save_json(sources_path, sources_data)
+        # Both paths confirmed — commit both files, THEN update globals.
+        save_json_pair(items_path, items_data, sources_path, sources_data)
         ITEMS_PATH   = items_path
         SOURCES_PATH = sources_path
         ITEMS_READY = True
@@ -787,6 +855,12 @@ def save_new_document():
             "items_filename":   os.path.basename(items_path),
             "sources_filename": os.path.basename(sources_path)
         })
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "kind": "path_conflict",
+            "message": str(e),
+        }), 409
     except Exception as e:
         print(e)
         return jsonify({"status": "error", "message": str(e)}), 500
