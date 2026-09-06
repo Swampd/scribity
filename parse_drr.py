@@ -8,8 +8,11 @@ Usage:
     from parse_drr import parse_mdx_file, parse_mdx_folder
 """
 
-import re
+import hashlib
 import os
+import posixpath
+import re
+import unicodedata
 import uuid
 from typing import List, Dict, Tuple, Optional
 
@@ -32,16 +35,38 @@ SOURCE_TEMPLATE = {
 }
 
 
-def _make_source(cite_num: int, raw_title: str, url: str, report_slug: str) -> dict:
+def _normalize_report_identity(report_identity: str) -> str:
+    """Normalize a relative report path consistently across operating systems."""
+    normalized = unicodedata.normalize('NFC', os.fspath(report_identity))
+    return posixpath.normpath(normalized.replace('\\', '/'))
+
+
+def _report_identity_digest(report_identity: str, cite_num: int) -> str:
+    """Return a stable collision-resistant digest for one report citation."""
+    identity = _normalize_report_identity(report_identity)
+    digest_input = f"{identity}\0{cite_num}".encode('utf-8')
+    return hashlib.sha256(digest_input).hexdigest()[:16]
+
+
+def _source_id(cite_num: int, report_identity: str) -> str:
+    """Build a readable ID whose uniqueness comes from the full report identity."""
+    identity = _normalize_report_identity(report_identity)
+    basename = posixpath.splitext(posixpath.basename(identity))[0]
+    report_slug = re.sub(r'[^a-zA-Z0-9]', '_', basename)[:36] or 'report'
+    digest = _report_identity_digest(identity, cite_num)
+    return f"src_{report_slug}_{cite_num}_{digest}"
+
+
+def _make_source(cite_num: int, raw_title: str, url: str,
+                 report_identity: str) -> dict:
     """Create a source record from a parsed source line."""
     parts = raw_title.rsplit(' - ', 1)
     src_title = parts[0].strip() if parts else raw_title
     src_publication = parts[1].strip() if len(parts) > 1 else ''
-    source_id = f"src_{report_slug}_{cite_num}"
 
     return {
         **SOURCE_TEMPLATE,
-        'id_source': source_id,
+        'id_source': _source_id(cite_num, report_identity),
         'short_cite': raw_title[:80],
         'title': src_title,
         'publication': src_publication,
@@ -212,7 +237,7 @@ def _process_table(table_lead_in: str, table_header: str,
     return items
 
 
-def parse_mdx_file(filepath: str) -> dict:
+def parse_mdx_file(filepath: str, report_identity: Optional[str] = None) -> dict:
     """Parse a single .mdx DRR report file.
 
     Returns:
@@ -228,8 +253,9 @@ def parse_mdx_file(filepath: str) -> dict:
     with open(filepath, 'r', encoding='utf-8') as f:
         lines = f.read().split('\n')
 
-    basename = os.path.splitext(os.path.basename(filepath))[0]
-    report_slug = re.sub(r'[^a-zA-Z0-9]', '_', basename)[:50]
+    if report_identity is None:
+        report_identity = os.path.basename(filepath)
+    report_identity = _normalize_report_identity(report_identity)
 
     # --- Phase 1: Frontmatter ---
     report_date = ''
@@ -259,13 +285,30 @@ def parse_mdx_file(filepath: str) -> dict:
             break
 
     source_map = {}
+    collisions = []
     if sources_start is not None:
         for i in range(sources_start + 1, len(lines)):
             m = SOURCE_LINE.match(lines[i].strip())
             if m:
                 cn = int(m.group(1))
-                source_map[cn] = _make_source(cn, m.group(2).strip(),
-                                              m.group(3).strip(), report_slug)
+                source = _make_source(
+                    cn,
+                    m.group(2).strip(),
+                    m.group(3).strip(),
+                    report_identity,
+                )
+                if cn in source_map:
+                    collisions.append({
+                        'kind': 'source_id_collision',
+                        'id_source': source['id_source'],
+                        'reports': [report_identity],
+                        'message': (
+                            f"Citation {cn} is defined more than once in "
+                            f"{report_identity}."
+                        ),
+                    })
+                    continue
+                source_map[cn] = source
 
     # --- Phase 4: Body parsing ---
     # Find first ## heading (skip everything before it: summary + JSX)
@@ -280,7 +323,13 @@ def parse_mdx_file(filepath: str) -> dict:
     empty_result = {
         'items': [], 'sources': list(source_map.values()),
         'title': title, 'report_date': report_date, 'filepath': filepath,
-        'stats': {'items': 0, 'sources': len(source_map), 'sections': 0}
+        'collisions': collisions,
+        'stats': {
+            'items': 0,
+            'sources': len(source_map),
+            'sections': 0,
+            'source_id_collisions': len(collisions),
+        }
     }
     if body_start is None:
         return empty_result
@@ -423,10 +472,12 @@ def parse_mdx_file(filepath: str) -> dict:
         'title': title,
         'report_date': report_date,
         'filepath': filepath,
+        'collisions': collisions,
         'stats': {
             'items': len(all_items),
             'sources': len(source_map),
             'sections': section_count,
+            'source_id_collisions': len(collisions),
         }
     }
 
@@ -439,6 +490,8 @@ def parse_mdx_folder(folderpath: str) -> dict:
     all_items = []
     all_sources = []
     file_results = []
+    collision_by_id = {}
+    source_report_by_id = {}
 
     mdx_files = sorted([
         f for f in os.listdir(folderpath)
@@ -447,9 +500,35 @@ def parse_mdx_folder(folderpath: str) -> dict:
 
     for filename in mdx_files:
         filepath = os.path.join(folderpath, filename)
-        result = parse_mdx_file(filepath)
+        report_identity = os.path.relpath(filepath, folderpath)
+        report_identity = _normalize_report_identity(report_identity)
+        result = parse_mdx_file(filepath, report_identity=report_identity)
         all_items.extend(result['items'])
         all_sources.extend(result['sources'])
+
+        for collision in result.get('collisions', []):
+            source_id = collision.get('id_source', '')
+            if source_id:
+                collision_by_id[source_id] = collision
+
+        for source in result['sources']:
+            source_id = source.get('id_source', '')
+            if not source_id:
+                continue
+            previous_report = source_report_by_id.get(source_id)
+            if previous_report is None:
+                source_report_by_id[source_id] = report_identity
+                continue
+
+            collision = collision_by_id.setdefault(source_id, {
+                'kind': 'source_id_collision',
+                'id_source': source_id,
+                'reports': [previous_report],
+                'message': f"Source ID {source_id} was generated by multiple reports.",
+            })
+            if report_identity not in collision['reports']:
+                collision['reports'].append(report_identity)
+
         file_results.append({
             'filename': filename,
             'title': result['title'],
@@ -460,10 +539,12 @@ def parse_mdx_folder(folderpath: str) -> dict:
         'items': all_items,
         'sources': all_sources,
         'files': file_results,
+        'collisions': list(collision_by_id.values()),
         'stats': {
             'total_items': len(all_items),
             'total_sources': len(all_sources),
             'total_files': len(mdx_files),
+            'source_id_collisions': len(collision_by_id),
         }
     }
 

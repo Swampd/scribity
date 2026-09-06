@@ -437,6 +437,77 @@ class ParserAppendSaveTests(ScribityServerTestCase):
         self.assertEqual(self.read_json(server.ITEMS_PATH), new_items)
         self.assertEqual(self.read_json(server.SOURCES_PATH), new_sources)
 
+    def test_append_import_rejects_conflicting_imported_source_ids_without_writing(self):
+        existing_source = {
+            "id_source": "src_collision",
+            "title": "Existing source",
+            "url": "https://example.com/existing",
+        }
+        server.SOURCES_PATH = self.write_json("sources.json", [existing_source])
+        original_items = self.read_json(server.ITEMS_PATH)
+
+        response = self.client.post(
+            "/api/append_import",
+            json={
+                "items": original_items + [{"id_item": "not-saved"}],
+                "sources": [existing_source],
+                "imported_sources": [{
+                    "id_source": "src_collision",
+                    "title": "Different source",
+                    "url": "https://example.com/different",
+                }],
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["kind"], "source_id_collision")
+        self.assertEqual(payload["source_ids"], ["src_collision"])
+        self.assertEqual(self.read_json(server.ITEMS_PATH), original_items)
+        self.assertEqual(self.read_json(server.SOURCES_PATH), [existing_source])
+
+    def test_append_import_allows_an_identical_existing_source(self):
+        existing_source = {
+            "id_source": "src_same_report",
+            "title": "Same source",
+            "url": "https://example.com/same",
+        }
+        server.SOURCES_PATH = self.write_json("sources.json", [existing_source])
+        new_items = self.original_items + [{"id_item": "reimported"}]
+
+        response = self.client.post(
+            "/api/append_import",
+            json={
+                "items": new_items,
+                "sources": [existing_source],
+                "imported_sources": [existing_source],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.read_json(server.ITEMS_PATH), new_items)
+        self.assertEqual(self.read_json(server.SOURCES_PATH), [existing_source])
+
+    def test_append_import_rejects_duplicate_ids_inside_one_import(self):
+        duplicate_sources = [
+            {"id_source": "src_duplicate", "url": "https://example.com/one"},
+            {"id_source": "src_duplicate", "url": "https://example.com/two"},
+        ]
+
+        response = self.client.post(
+            "/api/append_import",
+            json={
+                "items": self.original_items,
+                "sources": self.original_sources,
+                "imported_sources": duplicate_sources,
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["source_ids"], ["src_duplicate"])
+        self.assertEqual(self.read_json(server.ITEMS_PATH), self.original_items)
+        self.assertEqual(self.read_json(server.SOURCES_PATH), self.original_sources)
+
     def test_append_import_restores_items_when_sources_commit_fails(self):
         new_items = self.original_items + [{"id_item": "imported"}]
         new_sources = self.original_sources + [{"id_source": "imported-source"}]

@@ -237,6 +237,33 @@ def invalid_document_shape_response(error, document):
         "message": str(error),
     }), 422
 
+
+def find_source_id_collisions(existing_sources, imported_sources):
+    """Return IDs duplicated within an import or conflicting with stored sources."""
+    existing_by_id = {
+        source.get('id_source'): source
+        for source in existing_sources
+        if source.get('id_source')
+    }
+    imported_by_id = {}
+    collision_ids = set()
+
+    for source in imported_sources:
+        source_id = source.get('id_source')
+        if not source_id:
+            continue
+        if source_id in imported_by_id:
+            collision_ids.add(source_id)
+        else:
+            imported_by_id[source_id] = source
+
+        existing_source = existing_by_id.get(source_id)
+        if existing_source is not None and existing_source != source:
+            collision_ids.add(source_id)
+
+    return sorted(collision_ids)
+
+
 def save_json(path, data):
     """Generic JSON saver with atomic write to prevent corruption."""
     with SAVE_LOCK:
@@ -643,6 +670,30 @@ def append_import():
             validate_document_structure(data, name.capitalize())
         except JsonDocumentShapeError as error:
             return invalid_document_shape_response(error, name)
+
+    imported_sources = payload.get('imported_sources')
+    if imported_sources is not None:
+        try:
+            validate_document_structure(imported_sources, "Imported sources")
+        except JsonDocumentShapeError as error:
+            return invalid_document_shape_response(error, "imported_sources")
+
+        try:
+            existing_sources = load_json(SOURCES_PATH)
+        except JsonDocumentError as error:
+            return json_document_error_response(error, "sources")
+
+        collision_ids = find_source_id_collisions(existing_sources, imported_sources)
+        if collision_ids:
+            return jsonify({
+                "status": "error",
+                "kind": "source_id_collision",
+                "source_ids": collision_ids,
+                "message": (
+                    "Append stopped because imported source IDs conflict: "
+                    + ", ".join(collision_ids)
+                ),
+            }), 409
 
     try:
         save_json_pair(

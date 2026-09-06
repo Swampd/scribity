@@ -3400,6 +3400,7 @@
                                         const totalItems = stats.total_items || stats.items || 0;
                                         const totalSources = stats.total_sources || stats.sources || 0;
                                         const files = parseResult.files || (parseResult.title ? [{ title: parseResult.title, stats: parseResult.stats }] : []);
+                                        const parserCollisions = Array.isArray(parseResult.collisions) ? parseResult.collisions : [];
                                         return (
                                             <>
                                                 {/* Stats bar */}
@@ -3422,6 +3423,8 @@
                                                     <span className="text-xs text-slate-500 font-mono truncate flex-1">{parseResult.selected_path || parseResult.filepath || ''}</span>
                                                     <div className="flex items-center gap-2 shrink-0">
                                                         <button
+                                                            disabled={parserCollisions.length > 0}
+                                                            title={parserCollisions.length > 0 ? 'Resolve source ID collisions before saving' : ''}
                                                             onClick={async () => {
                                                                 try {
                                                                     const r = await api('save_new_document', {
@@ -3447,17 +3450,45 @@
                                                                     setStatus('Saved to new file and loaded');
                                                                 } catch (e) { setParseError('Server error: ' + e.message); }
                                                             }}
-                                                            className="bg-orange-600 hover:bg-orange-500 text-white px-4 py-1.5 rounded font-bold text-xs flex items-center gap-2 transition-colors"
+                                                            className="bg-orange-600 hover:bg-orange-500 text-white px-4 py-1.5 rounded font-bold text-xs flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                                         >
                                                             <Icon name="file-plus" size={14} /> Save to New File
                                                         </button>
                                                         <button
-                                                            disabled={parseSaving}
+                                                            disabled={parseSaving || parserCollisions.length > 0}
+                                                            title={parserCollisions.length > 0 ? 'Resolve source ID collisions before appending' : ''}
                                                             onClick={async () => {
+                                                                const importedSources = parseResult.sources || [];
+                                                                const existingSourcesById = new Map(sources.map(source => [source.id_source, source]));
+                                                                const importedSourcesById = new Map();
+                                                                const collisionIds = new Set();
+                                                                const sourceRecordsMatch = (first, second) => {
+                                                                    const keys = new Set([...Object.keys(first || {}), ...Object.keys(second || {})]);
+                                                                    return [...keys].every(key => JSON.stringify(first?.[key] ?? null) === JSON.stringify(second?.[key] ?? null));
+                                                                };
+
+                                                                importedSources.forEach(source => {
+                                                                    const sourceId = source.id_source;
+                                                                    if (!sourceId) return;
+                                                                    if (importedSourcesById.has(sourceId)) collisionIds.add(sourceId);
+                                                                    else importedSourcesById.set(sourceId, source);
+                                                                    const existingSource = existingSourcesById.get(sourceId);
+                                                                    if (existingSource && !sourceRecordsMatch(existingSource, source)) {
+                                                                        collisionIds.add(sourceId);
+                                                                    }
+                                                                });
+
+                                                                if (collisionIds.size > 0) {
+                                                                    const ids = [...collisionIds].sort();
+                                                                    setParseError(`Append stopped: source ID collision${ids.length === 1 ? '' : 's'}: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ` (+${ids.length - 5} more)` : ''}`);
+                                                                    setStatus('Append Error');
+                                                                    return;
+                                                                }
+
                                                                 const importedItems = normalizeItems(parseResult.items, 'research');
                                                                 const newItems = [...items, ...importedItems];
                                                                 const existingSourceIds = new Set(sources.map(s => s.id_source));
-                                                                const newSources = [...sources, ...parseResult.sources.filter(s => !existingSourceIds.has(s.id_source))];
+                                                                const newSources = [...sources, ...importedSources.filter(s => !existingSourceIds.has(s.id_source))];
                                                                 setParseSaving(true);
                                                                 setParseError(null);
                                                                 setStatus('Appending import...');
@@ -3468,6 +3499,7 @@
                                                                         body: JSON.stringify({
                                                                             items: denormalizeItems(newItems, schemaModeRef.current),
                                                                             sources: newSources,
+                                                                            imported_sources: importedSources,
                                                                         }),
                                                                     });
                                                                     await readApiResponse(response);
@@ -3492,6 +3524,23 @@
                                                         </button>
                                                     </div>
                                                 </div>
+
+                                                {parserCollisions.length > 0 && (
+                                                    <div role="alert" className="bg-red-900/30 border border-red-700 text-red-200 px-4 py-3 rounded-lg mb-6 text-sm">
+                                                        <div className="font-bold mb-1">
+                                                            <Icon name="alert-triangle" size={14} className="inline mr-2" />
+                                                            Source ID collision{parserCollisions.length === 1 ? '' : 's'} detected — saving is disabled
+                                                        </div>
+                                                        {parserCollisions.slice(0, 5).map((collision, index) => (
+                                                            <div key={`${collision.id_source || 'collision'}-${index}`} className="text-xs font-mono text-red-300 mt-1">
+                                                                {collision.message || collision.id_source}
+                                                            </div>
+                                                        ))}
+                                                        {parserCollisions.length > 5 && (
+                                                            <div className="text-xs text-red-300 mt-1">+{parserCollisions.length - 5} more collision{parserCollisions.length - 5 === 1 ? '' : 's'}</div>
+                                                        )}
+                                                    </div>
+                                                )}
 
                                                 {/* Per-file breakdown (if folder) */}
                                                 {files.length > 1 && (
