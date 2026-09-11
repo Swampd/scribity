@@ -19,6 +19,8 @@ class ScribityServerTestCase(unittest.TestCase):
             "CONFIG_PATH": server.CONFIG_PATH,
             "ITEMS_READY": getattr(server, "ITEMS_READY", None),
             "SOURCES_READY": getattr(server, "SOURCES_READY", None),
+            "ITEMS_DOCUMENT": dict(server.ITEMS_DOCUMENT),
+            "SOURCES_DOCUMENT": dict(server.SOURCES_DOCUMENT),
         }
         self.addCleanup(self.restore_server_state)
 
@@ -27,6 +29,8 @@ class ScribityServerTestCase(unittest.TestCase):
         server.SOURCES_PATH = self.write_json("sources.json", [])
         server.ITEMS_READY = False
         server.SOURCES_READY = False
+        server.reset_document_state("items")
+        server.reset_document_state("sources")
         server.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
         self.client = server.app.test_client()
 
@@ -43,6 +47,10 @@ class ScribityServerTestCase(unittest.TestCase):
                     pass
             else:
                 setattr(server, name, original)
+        server.ITEMS_DOCUMENT.clear()
+        server.ITEMS_DOCUMENT.update(self.original_state["ITEMS_DOCUMENT"])
+        server.SOURCES_DOCUMENT.clear()
+        server.SOURCES_DOCUMENT.update(self.original_state["SOURCES_DOCUMENT"])
 
     def path(self, filename):
         return os.path.join(self.temp_dir.name, filename)
@@ -65,6 +73,23 @@ class ScribityServerTestCase(unittest.TestCase):
         if "template" in parameters:
             return server.load_json(path, None)
         return server.load_json(path)
+
+    def versioned_payload(self, document, data):
+        state = server.current_document_state(document)
+        return {
+            "data": data,
+            "document_token": state["token"],
+            "revision": state["revision"],
+        }
+
+    def append_payload(self, items, sources, **extra):
+        return {
+            "items": items,
+            "sources": sources,
+            "items_document": server.current_document_state("items"),
+            "sources_document": server.current_document_state("sources"),
+            **extra,
+        }
 
 
 class StrictJsonLoadingTests(ScribityServerTestCase):
@@ -131,6 +156,8 @@ class JsonRouteSafetyTests(ScribityServerTestCase):
         self.assertEqual(payload["document"], "items")
         self.assertEqual(payload["kind"], "invalid_json")
         self.assertNotIn("items", payload)
+        self.assertEqual(payload["items_document"], server.current_document_state("items"))
+        self.assertEqual(payload["sources_document"], server.current_document_state("sources"))
 
     def test_failed_initial_load_blocks_item_saves(self):
         original_content = "["
@@ -152,9 +179,170 @@ class JsonRouteSafetyTests(ScribityServerTestCase):
         self.assertTrue(server.SOURCES_READY)
         save_response = self.client.post(
             "/api/save_items",
-            json=[{"id_item": "saved"}],
+            json=self.versioned_payload("items", [{"id_item": "saved"}]),
         )
         self.assertEqual(save_response.status_code, 200)
+
+
+class DocumentIdentitySafetyTests(ScribityServerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.original_items = [{"id_item": "original"}]
+        self.original_sources = [{"id_source": "original-source"}]
+        server.ITEMS_PATH = self.write_json("items.json", self.original_items)
+        server.SOURCES_PATH = self.write_json("sources.json", self.original_sources)
+        server.ITEMS_READY = True
+        server.SOURCES_READY = True
+
+    def read_json(self, path):
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def current_documents(self, client=None):
+        response = (client or self.client).get("/api/data")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        return payload["items_document"], payload["sources_document"]
+
+    def versioned_save(self, route, data, document, client=None):
+        return (client or self.client).post(
+            route,
+            json={
+                "data": data,
+                "document_token": document["token"],
+                "revision": document["revision"],
+            },
+        )
+
+    def test_delayed_item_save_is_rejected_after_items_file_switches(self):
+        old_items_path = server.ITEMS_PATH
+        old_document, _ = self.current_documents()
+        new_items = [{"id_item": "new-file-content"}]
+        new_items_path = self.write_json("new-items.json", new_items)
+
+        switch_response = self.client.post(
+            "/api/switch_items",
+            json={"path": new_items_path},
+        )
+        self.assertEqual(switch_response.status_code, 200)
+
+        stale_response = self.versioned_save(
+            "/api/save_items",
+            [{"id_item": "delayed-old-content"}],
+            old_document,
+        )
+
+        self.assertEqual(stale_response.status_code, 409)
+        self.assertEqual(stale_response.get_json()["kind"], "stale_document")
+        self.assertEqual(self.read_json(old_items_path), self.original_items)
+        self.assertEqual(self.read_json(new_items_path), new_items)
+
+    def test_second_browser_tab_cannot_overwrite_a_newer_item_revision(self):
+        first_tab = self.client
+        second_tab = server.app.test_client()
+        first_document, _ = self.current_documents(first_tab)
+        second_document, _ = self.current_documents(second_tab)
+        self.assertEqual(first_document, second_document)
+
+        first_save = self.versioned_save(
+            "/api/save_items",
+            [{"id_item": "first-tab-save"}],
+            first_document,
+            first_tab,
+        )
+        self.assertEqual(first_save.status_code, 200)
+        advanced_document = first_save.get_json()["document"]
+        self.assertEqual(advanced_document["token"], first_document["token"])
+        self.assertEqual(advanced_document["revision"], first_document["revision"] + 1)
+
+        stale_save = self.versioned_save(
+            "/api/save_items",
+            [{"id_item": "second-tab-stale-save"}],
+            second_document,
+            second_tab,
+        )
+
+        self.assertEqual(stale_save.status_code, 409)
+        self.assertEqual(stale_save.get_json()["kind"], "stale_document")
+        self.assertEqual(
+            self.read_json(server.ITEMS_PATH),
+            [{"id_item": "first-tab-save"}],
+        )
+
+    def test_append_import_rejects_a_stale_source_document(self):
+        items_document, old_sources_document = self.current_documents()
+        new_sources = [{"id_source": "new-source-file"}]
+        new_sources_path = self.write_json("new-sources.json", new_sources)
+        switch_response = self.client.post(
+            "/api/switch_sources",
+            json={"path": new_sources_path},
+        )
+        self.assertEqual(switch_response.status_code, 200)
+
+        response = self.client.post(
+            "/api/append_import",
+            json={
+                "items": self.original_items,
+                "sources": [{"id_source": "delayed-old-source"}],
+                "items_document": items_document,
+                "sources_document": old_sources_document,
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["kind"], "stale_document")
+        self.assertEqual(self.read_json(new_sources_path), new_sources)
+
+    def test_save_as_rejects_a_stale_revision_before_opening_dialog(self):
+        old_items_document, _ = self.current_documents()
+        first_save = self.versioned_save(
+            "/api/save_items",
+            [{"id_item": "newer"}],
+            old_items_document,
+        )
+        self.assertEqual(first_save.status_code, 200)
+
+        with mock.patch.object(server, "TK_AVAILABLE", True), \
+                mock.patch.object(server, "tk", create=True) as tk_module, \
+                mock.patch.object(server, "filedialog", create=True) as file_dialog:
+            response = self.client.post(
+                "/api/save_items_as",
+                json={
+                    "data": [{"id_item": "stale"}],
+                    "document_token": old_items_document["token"],
+                    "revision": old_items_document["revision"],
+                },
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["kind"], "stale_document")
+        tk_module.Tk.assert_not_called()
+        file_dialog.asksaveasfilename.assert_not_called()
+        self.assertEqual(self.read_json(server.ITEMS_PATH), [{"id_item": "newer"}])
+
+    def test_new_document_returns_fresh_identifiers_for_both_files(self):
+        old_items_document, old_sources_document = self.current_documents()
+        items_target = self.path("fresh-items.json")
+        sources_target = self.path("fresh-sources.json")
+
+        with mock.patch.object(server, "TK_AVAILABLE", True), \
+                mock.patch.object(server, "tk", create=True), \
+                mock.patch.object(server, "filedialog", create=True) as file_dialog:
+            file_dialog.asksaveasfilename.side_effect = [items_target, sources_target]
+            response = self.client.post(
+                "/api/new_document",
+                json={
+                    "items_document": old_items_document,
+                    "sources_document": old_sources_document,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertNotEqual(payload["items_document"]["token"], old_items_document["token"])
+        self.assertNotEqual(payload["sources_document"]["token"], old_sources_document["token"])
+        self.assertEqual(payload["items_document"]["revision"], 0)
+        self.assertEqual(payload["sources_document"]["revision"], 0)
 
 
 class SavePayloadValidationTests(ScribityServerTestCase):
@@ -172,9 +360,11 @@ class SavePayloadValidationTests(ScribityServerTestCase):
             return json.load(handle)
 
     def post_json_value(self, route, value):
+        document = "sources" if "sources" in route else "items"
+        payload = self.versioned_payload(document, value)
         return self.client.post(
             route,
-            data=json.dumps(value),
+            data=json.dumps(payload),
             content_type="application/json",
         )
 
@@ -250,6 +440,11 @@ class TwoFileCreationSafetyTests(ScribityServerTestCase):
         self.active_sources_path = server.SOURCES_PATH
 
     def post_with_dialog_paths(self, route, payload, items_path, sources_path):
+        payload = {
+            **payload,
+            "items_document": server.current_document_state("items"),
+            "sources_document": server.current_document_state("sources"),
+        }
         with mock.patch.object(server, "TK_AVAILABLE", True), \
                 mock.patch.object(server, "tk", create=True), \
                 mock.patch.object(server, "filedialog", create=True) as file_dialog:
@@ -429,7 +624,7 @@ class ParserAppendSaveTests(ScribityServerTestCase):
 
         response = self.client.post(
             "/api/append_import",
-            json={"items": new_items, "sources": new_sources},
+            json=self.append_payload(new_items, new_sources),
         )
 
         self.assertEqual(response.status_code, 200)
@@ -448,15 +643,15 @@ class ParserAppendSaveTests(ScribityServerTestCase):
 
         response = self.client.post(
             "/api/append_import",
-            json={
-                "items": original_items + [{"id_item": "not-saved"}],
-                "sources": [existing_source],
-                "imported_sources": [{
+            json=self.append_payload(
+                original_items + [{"id_item": "not-saved"}],
+                [existing_source],
+                imported_sources=[{
                     "id_source": "src_collision",
                     "title": "Different source",
                     "url": "https://example.com/different",
                 }],
-            },
+            ),
         )
 
         self.assertEqual(response.status_code, 409)
@@ -477,11 +672,11 @@ class ParserAppendSaveTests(ScribityServerTestCase):
 
         response = self.client.post(
             "/api/append_import",
-            json={
-                "items": new_items,
-                "sources": [existing_source],
-                "imported_sources": [existing_source],
-            },
+            json=self.append_payload(
+                new_items,
+                [existing_source],
+                imported_sources=[existing_source],
+            ),
         )
 
         self.assertEqual(response.status_code, 200)
@@ -496,11 +691,11 @@ class ParserAppendSaveTests(ScribityServerTestCase):
 
         response = self.client.post(
             "/api/append_import",
-            json={
-                "items": self.original_items,
-                "sources": self.original_sources,
-                "imported_sources": duplicate_sources,
-            },
+            json=self.append_payload(
+                self.original_items,
+                self.original_sources,
+                imported_sources=duplicate_sources,
+            ),
         )
 
         self.assertEqual(response.status_code, 409)
@@ -524,7 +719,7 @@ class ParserAppendSaveTests(ScribityServerTestCase):
         with mock.patch.object(server.os, "replace", side_effect=fail_first_source_commit):
             response = self.client.post(
                 "/api/append_import",
-                json={"items": new_items, "sources": new_sources},
+                json=self.append_payload(new_items, new_sources),
             )
 
         self.assertEqual(response.status_code, 500)
@@ -555,7 +750,7 @@ class ParserAppendSaveTests(ScribityServerTestCase):
         ):
             response = self.client.post(
                 "/api/append_import",
-                json={"items": new_items, "sources": new_sources},
+                json=self.append_payload(new_items, new_sources),
             )
 
         self.assertEqual(response.status_code, 500)

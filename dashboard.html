@@ -522,7 +522,7 @@
 
         // --- EXAMPLE MANAGER COMPONENT ---
 
-        const ExampleManager = ({ item, labels, onSave }) => {
+        const ExampleManager = ({ item, labels, onSave, onLocalChange, noteSaveTimer }) => {
             const examples = EXAMPLE_FIELDS.map((f, i) => ({
                 key: f,
                 noteKey: EXAMPLE_NOTE_FIELDS[i],
@@ -534,7 +534,6 @@
             const [editingIdx, setEditingIdx] = useState(null);
             const [editingNoteIdx, setEditingNoteIdx] = useState(null);
             const [localNotes, setLocalNotes] = useState({});
-            const noteTimer = useRef(null);
 
             const handleDelete = (idx) => {
                 const texts = examples.map(e => e.text);
@@ -567,14 +566,16 @@
 
             const handleNoteEdit = (idx, newNote) => {
                 const noteKey = EXAMPLE_NOTE_FIELDS[idx];
+                const newItem = { ...item, [noteKey]: newNote };
                 // Immediate local update for responsive UI
                 setLocalNotes(prev => ({ ...prev, [noteKey]: newNote }));
+                onLocalChange(newItem);
                 // Debounced save to server (600ms)
-                if (noteTimer.current) clearTimeout(noteTimer.current);
-                noteTimer.current = setTimeout(() => {
-                    onSave({ ...item, [noteKey]: newNote });
+                if (noteSaveTimer.current) clearTimeout(noteSaveTimer.current);
+                noteSaveTimer.current = setTimeout(() => {
+                    onSave(newItem);
                     setLocalNotes(prev => { const n = { ...prev }; delete n[noteKey]; return n; });
-                    noteTimer.current = null;
+                    noteSaveTimer.current = null;
                 }, 600);
             };
 
@@ -591,20 +592,32 @@
                             )}
                         </label>
                         <div className="flex items-center gap-4">
-                            <div className="flex items-center gap-2">
+                            <label className="flex items-center gap-2 cursor-pointer">
                                 <span className="text-[10px] uppercase text-slate-500 font-bold">Only Example</span>
-                                <div
-                                    className={`toggle-switch ${item.contains_only_example ? 'active' : ''}`}
-                                    onClick={() => onSave({ ...item, contains_only_example: !item.contains_only_example })}
+                                <input
+                                    type="checkbox"
+                                    className="sr-only peer"
+                                    checked={Boolean(item.contains_only_example)}
+                                    onChange={(e) => onSave({ ...item, contains_only_example: e.target.checked })}
                                 />
-                            </div>
-                            <div className="flex items-center gap-2">
+                                <span
+                                    aria-hidden="true"
+                                    className={`toggle-switch peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-400 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-slate-900 ${item.contains_only_example ? 'active' : ''}`}
+                                />
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
                                 <span className="text-[10px] uppercase text-slate-500 font-bold">Has Example</span>
-                                <div
-                                    className={`toggle-switch ${item.contains_example ? 'active' : ''}`}
-                                    onClick={() => onSave({ ...item, contains_example: !item.contains_example })}
+                                <input
+                                    type="checkbox"
+                                    className="sr-only peer"
+                                    checked={Boolean(item.contains_example)}
+                                    onChange={(e) => onSave({ ...item, contains_example: e.target.checked })}
                                 />
-                            </div>
+                                <span
+                                    aria-hidden="true"
+                                    className={`toggle-switch peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-400 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-slate-900 ${item.contains_example ? 'active' : ''}`}
+                                />
+                            </label>
                         </div>
                     </div>
 
@@ -892,6 +905,7 @@
             // E016: Undo/Redo stacks
             const undoStack = useRef([]);
             const redoStack = useRef([]);
+            const itemsHistoryDocumentToken = useRef(null);
             const UNDO_LIMIT = 30;
 
             // E016: Delete undo toast (supports items + sources)
@@ -969,11 +983,12 @@
             const inspectorSaveTimer = useRef(null);
             const inspectorUndoSnapshot = useRef(null); // Captures pre-edit state for undo
             const sourceSaveTimer = useRef(null);
+            const exampleNoteSaveTimer = useRef(null);
 
             // Serialize saves and coalesce intermediate snapshots while a request is active.
             // This prevents older requests from finishing after newer ones and overwriting them.
-            const itemsSaveQueue = useRef({ inFlight: false, pending: null });
-            const sourcesSaveQueue = useRef({ inFlight: false, pending: null });
+            const itemsSaveQueue = useRef({ inFlight: false, pending: null, lastError: null, idleWaiters: [] });
+            const sourcesSaveQueue = useRef({ inFlight: false, pending: null, lastError: null, idleWaiters: [] });
 
             // DRR Parser state
             const [parseResult, setParseResult] = useState(null);
@@ -990,6 +1005,111 @@
             // File tracking
             const [itemsFilename, setItemsFilename] = useState('No file');
             const [sourcesFilename, setSourcesFilename] = useState('No file');
+            const [itemsDocument, setItemsDocument] = useState({ token: null, revision: null });
+            const [sourcesDocument, setSourcesDocument] = useState({ token: null, revision: null });
+            const itemsDocumentRef = useRef(itemsDocument);
+            const sourcesDocumentRef = useRef(sourcesDocument);
+
+            const applyDocumentState = (document, state) => {
+                if (!state || typeof state.token !== 'string' || !Number.isInteger(state.revision)) return;
+                const next = { token: state.token, revision: state.revision };
+                if (document === 'items') {
+                    itemsDocumentRef.current = next;
+                    setItemsDocument(next);
+                } else {
+                    sourcesDocumentRef.current = next;
+                    setSourcesDocument(next);
+                }
+            };
+
+            const clearTimerRef = (timerRef) => {
+                if (timerRef.current) clearTimeout(timerRef.current);
+                timerRef.current = null;
+            };
+
+            const resetSaveQueueForActivation = (queueRef) => {
+                const queue = queueRef.current;
+                queue.pending = null;
+                queue.lastError = null;
+                if (!queue.inFlight) {
+                    const waiters = queue.idleWaiters.splice(0);
+                    waiters.forEach(({ resolve }) => resolve());
+                }
+            };
+
+            const clearDeleteUndoFor = (restoreType) => {
+                if (deleteToast?.restoreType !== restoreType) return;
+                clearTimerRef(deleteToastTimer);
+                setDeleteToast(null);
+            };
+
+            const resetItemsDocumentSession = (document) => {
+                [inspectorSaveTimer, draftSaveTimer, exampleNoteSaveTimer].forEach(clearTimerRef);
+                inspectorUndoSnapshot.current = null;
+                undoStack.current = [];
+                redoStack.current = [];
+                itemsHistoryDocumentToken.current = document.token;
+                resetSaveQueueForActivation(itemsSaveQueue);
+                clearDeleteUndoFor('items');
+                setDeleteConfirm(null);
+                setSelectedItemId(null);
+                setSelectedRule('__all__');
+                setSelectedSubpart(null);
+                setStageRule(null);
+                setStageSubpart(null);
+                setStageOpen(false);
+                setExpandedRules(new Set());
+                setBulkSelectedIds(new Set());
+                lastBulkClickIdx.current = null;
+                setSelectedScriptPart('__all__');
+                setActiveFilters(new Set());
+                setSearchQuery('');
+                setFloatingBtn(null);
+                stageDragIdx.current = null;
+                setStageDragOverIdx(null);
+                setView('library');
+            };
+
+            const discardStaleItemHistory = () => {
+                if (itemsHistoryDocumentToken.current !== itemsDocumentRef.current.token) {
+                    undoStack.current = [];
+                    redoStack.current = [];
+                    itemsHistoryDocumentToken.current = itemsDocumentRef.current.token;
+                    return true;
+                }
+                return false;
+            };
+
+            const resetSourcesDocumentSession = () => {
+                clearTimerRef(sourceSaveTimer);
+                resetSaveQueueForActivation(sourcesSaveQueue);
+                clearDeleteUndoFor('sources');
+                setDeleteConfirm(null);
+                setSelectedSourceId(null);
+                setSrcQuery('');
+                setSrcOpen(false);
+            };
+
+            const activateItemsDocument = ({ rawItems, filename, document, mode = null }) => {
+                const nextMode = mode || detectSchemaMode(rawItems);
+                const nextItems = normalizeItems(rawItems, nextMode);
+                applyDocumentState('items', document);
+                resetItemsDocumentSession(document);
+                itemsRef.current = nextItems;
+                setSchemaMode(nextMode);
+                setItems(nextItems);
+                setItemsReady(true);
+                setItemsFilename(filename || 'items.json');
+            };
+
+            const activateSourcesDocument = ({ sources: nextSources, filename, document }) => {
+                applyDocumentState('sources', document);
+                resetSourcesDocumentSession();
+                sourcesRef.current = nextSources;
+                setSources(nextSources);
+                setSourcesReady(true);
+                setSourcesFilename(filename || 'sources.json');
+            };
 
             const readApiResponse = async (response) => {
                 let payload;
@@ -999,7 +1119,12 @@
                     throw new Error(`Server returned an unreadable response (HTTP ${response.status}).`);
                 }
                 if (!response.ok || payload?.status === 'error') {
-                    throw new Error(payload?.message || `Request failed with HTTP ${response.status}.`);
+                    const apiError = new Error(payload?.message || `Request failed with HTTP ${response.status}.`);
+                    apiError.kind = payload?.kind;
+                    apiError.document = payload?.document;
+                    apiError.itemsDocument = payload?.items_document;
+                    apiError.sourcesDocument = payload?.sources_document;
+                    throw apiError;
                 }
                 return payload;
             };
@@ -1015,15 +1140,18 @@
             const openItemsPicker = async () => {
                 setStatus('Opening file picker...');
                 try {
+                    await flushPendingDocumentSaves('items');
                     const res = await api('open_items', { method: 'POST' });
                     const json = await readApiResponse(res);
                     if (json.status === 'success') {
                         const rawPicked = json.data || [];
                         const pickedMode = detectSchemaMode(rawPicked);
-                        setSchemaMode(pickedMode);
-                        setItems(normalizeItems(rawPicked, pickedMode));
-                        setItemsReady(true);
-                        setItemsFilename(json.filename);
+                        activateItemsDocument({
+                            rawItems: rawPicked,
+                            filename: json.filename,
+                            document: json.document,
+                            mode: pickedMode,
+                        });
                         setLoadError(null);
                         setStatus(`Items loaded (${pickedMode})`);
                     } else if (json.status === 'gui_unavailable') {
@@ -1038,10 +1166,12 @@
                             if (manualJson.status === 'success') {
                                 const rawManual = manualJson.data || [];
                                 const manualMode = detectSchemaMode(rawManual);
-                                setSchemaMode(manualMode);
-                                setItems(normalizeItems(rawManual, manualMode));
-                                setItemsReady(true);
-                                setItemsFilename(manualJson.filename);
+                                activateItemsDocument({
+                                    rawItems: rawManual,
+                                    filename: manualJson.filename,
+                                    document: manualJson.document,
+                                    mode: manualMode,
+                                });
                                 setLoadError(null);
                                 setStatus(`Items loaded (${manualMode})`);
                             }
@@ -1057,12 +1187,15 @@
             const openSourcesPicker = async () => {
                 setStatus('Opening file picker...');
                 try {
+                    await flushPendingDocumentSaves('sources');
                     const res = await api('open_sources', { method: 'POST' });
                     const json = await readApiResponse(res);
                     if (json.status === 'success') {
-                        setSources(json.data || []);
-                        setSourcesReady(true);
-                        setSourcesFilename(json.filename);
+                        activateSourcesDocument({
+                            sources: json.data || [],
+                            filename: json.filename,
+                            document: json.document,
+                        });
                         setLoadError(null);
                         setStatus('Sources loaded');
                     } else if (json.status === 'gui_unavailable') {
@@ -1075,9 +1208,11 @@
                             });
                             const manualJson = await readApiResponse(manualRes);
                             if (manualJson.status === 'success') {
-                                setSources(manualJson.data || []);
-                                setSourcesReady(true);
-                                setSourcesFilename(manualJson.filename);
+                                activateSourcesDocument({
+                                    sources: manualJson.data || [],
+                                    filename: manualJson.filename,
+                                    document: manualJson.document,
+                                });
                                 setLoadError(null);
                                 setStatus('Sources loaded');
                             }
@@ -1098,16 +1233,22 @@
                     const json = await readApiResponse(res);
                     const rawItems = json.items || [];
                     const mode = detectSchemaMode(rawItems);
-                    setSchemaMode(mode);
-                    setItems(normalizeItems(rawItems, mode));
-                    setSources(json.sources || []);
-                    setItemsReady(true);
-                    setSourcesReady(true);
-                    setItemsFilename(json.items_filename || 'items.json');
-                    setSourcesFilename(json.sources_filename || 'sources.json');
+                    activateItemsDocument({
+                        rawItems,
+                        filename: json.items_filename,
+                        document: json.items_document,
+                        mode,
+                    });
+                    activateSourcesDocument({
+                        sources: json.sources || [],
+                        filename: json.sources_filename,
+                        document: json.sources_document,
+                    });
                     setLoadError(null);
                     setStatus(`Loaded (${mode})`);
                 } catch (e) {
+                    applyDocumentState('items', e.itemsDocument);
+                    applyDocumentState('sources', e.sourcesDocument);
                     setItemsReady(false);
                     setSourcesReady(false);
                     reportLoadError(e);
@@ -1117,10 +1258,23 @@
             // Ref to always have current items for undo (avoids stale closure)
             const itemsRef = useRef(items);
             itemsRef.current = items;
+            const sourcesRef = useRef(sources);
+            sourcesRef.current = sources;
+
+            const waitForSaveQueue = (queueRef) => {
+                const queue = queueRef.current;
+                if (!queue.inFlight) {
+                    return queue.lastError ? Promise.reject(queue.lastError) : Promise.resolve();
+                }
+                return new Promise((resolve, reject) => {
+                    queue.idleWaiters.push({ resolve, reject });
+                });
+            };
 
             const enqueueSave = (queueRef, job) => {
                 const queue = queueRef.current;
                 queue.pending = job;
+                queue.lastError = null;
                 setStatus(job.savingStatus);
 
                 if (queue.inFlight) return;
@@ -1133,24 +1287,39 @@
                         while (queue.pending) {
                             activeJob = queue.pending;
                             queue.pending = null;
+                            const activeDocument = activeJob.documentRef.current;
+                            if (activeDocument.token !== activeJob.originDocument.token) {
+                                continue;
+                            }
                             const response = await api(activeJob.endpoint, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: activeJob.serialize()
+                                body: activeJob.serialize(activeDocument)
                             });
-                            if (!response.ok) {
-                                throw new Error(`${activeJob.endpoint} failed with HTTP ${response.status}`);
+                            const payload = await readApiResponse(response);
+                            if (activeJob.documentRef.current.token !== activeJob.originDocument.token) {
+                                continue;
                             }
+                            activeJob.applyResponse(payload);
                             finalStatus = activeJob.successStatus;
                         }
                         setStatus(finalStatus);
                     } catch (error) {
                         queue.pending = null;
+                        queue.lastError = error;
                         setStatus('Save Error');
-                        showErrorToast(activeJob?.errorMessage || 'Failed to save — server may be down');
+                        const message = error?.kind === 'stale_document'
+                            ? error.message
+                            : (activeJob?.errorMessage || error?.message || 'Failed to save — server may be down');
+                        showErrorToast(message);
                         console.error(error);
                     } finally {
                         queue.inFlight = false;
+                        const waiters = queue.idleWaiters.splice(0);
+                        waiters.forEach(({ resolve, reject }) => {
+                            if (queue.lastError) reject(queue.lastError);
+                            else resolve();
+                        });
                     }
                 };
 
@@ -1164,9 +1333,17 @@
                     return false;
                 }
                 const mode = schemaModeRef.current;
+                const originDocument = { ...itemsDocument };
                 enqueueSave(itemsSaveQueue, {
                     endpoint: 'save_items',
-                    serialize: () => JSON.stringify(denormalizeItems(newItems, mode)),
+                    originDocument,
+                    documentRef: itemsDocumentRef,
+                    serialize: (activeDocument) => JSON.stringify({
+                        data: denormalizeItems(newItems, mode),
+                        document_token: originDocument.token,
+                        revision: activeDocument.revision,
+                    }),
+                    applyResponse: (payload) => applyDocumentState('items', payload.document),
                     savingStatus: 'Saving Items...',
                     successStatus,
                     errorMessage: 'Failed to save items — server may be down'
@@ -1180,14 +1357,57 @@
                     setStatus('Save Blocked');
                     return false;
                 }
+                const originDocument = { ...sourcesDocument };
                 enqueueSave(sourcesSaveQueue, {
                     endpoint: 'save_sources',
-                    serialize: () => JSON.stringify(newSources),
+                    originDocument,
+                    documentRef: sourcesDocumentRef,
+                    serialize: (activeDocument) => JSON.stringify({
+                        data: newSources,
+                        document_token: originDocument.token,
+                        revision: activeDocument.revision,
+                    }),
+                    applyResponse: (payload) => applyDocumentState('sources', payload.document),
                     savingStatus: 'Saving Sources...',
                     successStatus,
                     errorMessage: 'Failed to save sources — server may be down'
                 });
                 return true;
+            };
+
+            const flushPendingDocumentSaves = async (document) => {
+                if (document === 'items') {
+                    const timers = [inspectorSaveTimer, draftSaveTimer, exampleNoteSaveTimer];
+                    const hadPendingTimer = timers.some(timer => timer.current);
+                    timers.forEach(timer => {
+                        if (timer.current) clearTimeout(timer.current);
+                        timer.current = null;
+                    });
+                    if (hadPendingTimer) {
+                        if (inspectorUndoSnapshot.current) {
+                            undoStack.current.push(inspectorUndoSnapshot.current);
+                            if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
+                            redoStack.current = [];
+                            inspectorUndoSnapshot.current = null;
+                        }
+                        queueItemsSave(itemsRef.current, 'Saved before switching');
+                    }
+                    await waitForSaveQueue(itemsSaveQueue);
+                    return;
+                }
+
+                const hadPendingTimer = Boolean(sourceSaveTimer.current);
+                if (sourceSaveTimer.current) clearTimeout(sourceSaveTimer.current);
+                sourceSaveTimer.current = null;
+                if (hadPendingTimer) queueSourcesSave(sourcesRef.current, 'Saved before switching');
+                await waitForSaveQueue(sourcesSaveQueue);
+            };
+
+            const flushAllPendingDocumentSaves = async () => {
+                await Promise.all([
+                    flushPendingDocumentSaves('items'),
+                    flushPendingDocumentSaves('sources'),
+                ]);
             };
 
             const saveItems = (newItems) => {
@@ -1227,6 +1447,10 @@
                         const tag = document.activeElement?.tagName?.toLowerCase();
                         if (tag === 'input' || tag === 'textarea') return; // Let browser handle text undo
                         e.preventDefault();
+                        if (discardStaleItemHistory()) {
+                            setStatus('Undo history cleared for opened document');
+                            return;
+                        }
                         if (undoStack.current.length === 0) return;
                         const prev = undoStack.current.pop();
                         redoStack.current.push([...itemsRef.current]);
@@ -1241,6 +1465,10 @@
                         const tag = document.activeElement?.tagName?.toLowerCase();
                         if (tag === 'input' || tag === 'textarea') return;
                         e.preventDefault();
+                        if (discardStaleItemHistory()) {
+                            setStatus('Redo history cleared for opened document');
+                            return;
+                        }
                         if (redoStack.current.length === 0) return;
                         const next = redoStack.current.pop();
                         undoStack.current.push([...itemsRef.current]);
@@ -1515,14 +1743,23 @@
             const saveItemsAs = async () => {
                 setStatus('Save As...');
                 try {
+                    await flushPendingDocumentSaves('items');
+                    const document = itemsDocumentRef.current;
                     const res = await api('save_items_as', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ data: denormalizeItems(items, schemaMode) })
+                        body: JSON.stringify({
+                            data: denormalizeItems(itemsRef.current, schemaModeRef.current),
+                            document_token: document.token,
+                            revision: document.revision,
+                        })
                     });
                     const json = await readApiResponse(res);
                     if (json.status === 'success') {
                         setItemsFilename(json.filename);
+                        applyDocumentState('items', json.document);
+                        // Save As keeps the same logical content and its valid history.
+                        itemsHistoryDocumentToken.current = json.document.token;
                         setItemsReady(true);
                         setLoadError(null);
                         setStatus('Saved As ' + json.filename);
@@ -1538,14 +1775,21 @@
             const saveSourcesAs = async () => {
                 setStatus('Save As...');
                 try {
+                    await flushPendingDocumentSaves('sources');
+                    const document = sourcesDocumentRef.current;
                     const res = await api('save_sources_as', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ data: sources })
+                        body: JSON.stringify({
+                            data: sourcesRef.current,
+                            document_token: document.token,
+                            revision: document.revision,
+                        })
                     });
                     const json = await readApiResponse(res);
                     if (json.status === 'success') {
                         setSourcesFilename(json.filename);
+                        applyDocumentState('sources', json.document);
                         setSourcesReady(true);
                         setLoadError(null);
                         setStatus('Saved As ' + json.filename);
@@ -1650,6 +1894,28 @@
                 document.addEventListener('mousemove', onMouseMove);
                 document.addEventListener('mouseup', onMouseUp);
             }, [stageWidth]);
+
+            const handlePanelResizeKeyDown = useCallback((event, setWidth) => {
+                let updateWidth = null;
+                switch (event.key) {
+                    case 'ArrowLeft':
+                        updateWidth = current => Math.max(200, current - 20);
+                        break;
+                    case 'ArrowRight':
+                        updateWidth = current => Math.min(600, current + 20);
+                        break;
+                    case 'Home':
+                        updateWidth = () => 200;
+                        break;
+                    case 'End':
+                        updateWidth = () => 600;
+                        break;
+                    default:
+                        return;
+                }
+                event.preventDefault();
+                setWidth(updateWidth);
+            }, []);
 
             // --- STAGE ITEMS (for pinned stageRule/stageSubpart, sorted by id_subpart) ---
             const stageItems = useMemo(() => {
@@ -2107,10 +2373,18 @@
 
                     {/* --- RESIZE HANDLE (sidebar) --- */}
                     <div
+                        role="separator"
+                        aria-label="Resize sidebar"
+                        aria-orientation="vertical"
+                        aria-valuemin="200"
+                        aria-valuemax="600"
+                        aria-valuenow={sidebarWidth}
+                        tabIndex={0}
                         onMouseDown={handleMouseDown}
+                        onKeyDown={(event) => handlePanelResizeKeyDown(event, setSidebarWidth)}
                         style={{ width: 5, cursor: 'col-resize', flexShrink: 0 }}
-                        className="bg-slate-800 hover:bg-indigo-500 transition-colors z-30"
-                        title="Drag to resize sidebar"
+                        className="bg-slate-800 hover:bg-indigo-500 focus:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-colors z-30"
+                        title="Drag to resize sidebar, or use Left and Right arrow keys"
                     />
 
                     {/* --- MAIN CONTENT --- */}
@@ -2285,21 +2559,29 @@
                                                             onClick={async () => {
                                                                 setNewDocModal(false);
                                                                 try {
-                                                                    const r = await api('new_document', { method: 'POST' });
-                                                                    const d = await r.json();
+                                                                    await flushAllPendingDocumentSaves();
+                                                                    const r = await api('new_document', {
+                                                                        method: 'POST',
+                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                        body: JSON.stringify({
+                                                                            items_document: itemsDocumentRef.current,
+                                                                            sources_document: sourcesDocumentRef.current,
+                                                                        }),
+                                                                    });
+                                                                    const d = await readApiResponse(r);
                                                                     if (d.status === 'canceled') return;
-                                                                    if (d.status !== 'success') { showErrorToast('New document failed: ' + (d.message || '')); return; }
-                                                                    setSchemaMode(mode);
-                                                                    setItems([]);
-                                                                    setSources([]);
-                                                                    setItemsReady(true);
-                                                                    setSourcesReady(true);
-                                                                    setItemsFilename(d.items_filename || 'items.json');
-                                                                    setSourcesFilename(d.sources_filename || 'sources.json');
+                                                                    activateItemsDocument({
+                                                                        rawItems: [],
+                                                                        filename: d.items_filename,
+                                                                        document: d.items_document,
+                                                                        mode,
+                                                                    });
+                                                                    activateSourcesDocument({
+                                                                        sources: [],
+                                                                        filename: d.sources_filename,
+                                                                        document: d.sources_document,
+                                                                    });
                                                                     setLoadError(null);
-                                                                    setSelectedRule('__all__');
-                                                                    setSelectedItemId(null);
-                                                                    setView('library');
                                                                     setStatus('New ' + mode + ' document');
                                                                 } catch (e) { showErrorToast('Server error: ' + e.message); }
                                                             }}
@@ -2427,6 +2709,32 @@
                                                         <div className="flex items-start justify-between gap-2 mb-1">
                                                             <span className="text-[10px] font-mono text-purple-400/70 font-bold">#{item._stageOrder}</span>
                                                             <div className="flex items-center gap-1">
+                                                                <button
+                                                                    type="button"
+                                                                    aria-label={`Move item ${idx + 1} up`}
+                                                                    disabled={idx === 0}
+                                                                    onClick={(event) => {
+                                                                        event.stopPropagation();
+                                                                        reorderStageItems(idx, idx - 1);
+                                                                    }}
+                                                                    className="p-0.5 rounded text-slate-500 hover:text-purple-300 hover:bg-purple-900/40 focus:outline-none focus:ring-1 focus:ring-purple-400 disabled:opacity-25 disabled:cursor-not-allowed"
+                                                                    title="Move up"
+                                                                >
+                                                                    <Icon name="arrow-up" size={11} />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    aria-label={`Move item ${idx + 1} down`}
+                                                                    disabled={idx === stageItems.length - 1}
+                                                                    onClick={(event) => {
+                                                                        event.stopPropagation();
+                                                                        reorderStageItems(idx, idx + 1);
+                                                                    }}
+                                                                    className="p-0.5 rounded text-slate-500 hover:text-purple-300 hover:bg-purple-900/40 focus:outline-none focus:ring-1 focus:ring-purple-400 disabled:opacity-25 disabled:cursor-not-allowed"
+                                                                    title="Move down"
+                                                                >
+                                                                    <Icon name="arrow-down" size={11} />
+                                                                </button>
                                                                 {item.id_script > 0 ? (
                                                                     <span className="text-[8px] bg-green-900/50 text-green-400 px-1 py-0.5 rounded font-bold">DRAFT</span>
                                                                 ) : (
@@ -2458,10 +2766,18 @@
 
                                     {/* Stage resize handle */}
                                     <div
+                                        role="separator"
+                                        aria-label="Resize stage"
+                                        aria-orientation="vertical"
+                                        aria-valuemin="200"
+                                        aria-valuemax="600"
+                                        aria-valuenow={stageWidth}
+                                        tabIndex={0}
                                         onMouseDown={handleStageMouseDown}
+                                        onKeyDown={(event) => handlePanelResizeKeyDown(event, setStageWidth)}
                                         style={{ width: 5, cursor: 'col-resize', flexShrink: 0 }}
-                                        className="bg-slate-800 hover:bg-purple-500 transition-colors z-30"
-                                        title="Drag to resize stage"
+                                        className="bg-slate-800 hover:bg-purple-500 focus:bg-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-300 transition-colors z-30"
+                                        title="Drag to resize stage, or use Left and Right arrow keys"
                                     />
                                 </>
                             )}
@@ -2513,6 +2829,11 @@
                                     {filteredItems.map((item, idx) => {
                                         const src = getSourceForItem(item);
                                         const isBulkSelected = bulkSelectedIds.has(item.id_item);
+                                        const stageTargetSubpart = stageSubpart === '__all_rule__' ? '' : (stageSubpart || '');
+                                        const stageRuleIndex = Array.isArray(item.rule_name) ? item.rule_name.indexOf(stageRule) : -1;
+                                        const isAssignedToActiveStage = Boolean(stageRule)
+                                            && stageRuleIndex !== -1
+                                            && (Array.isArray(item.subpart_name) ? (item.subpart_name[stageRuleIndex] || '') : '') === stageTargetSubpart;
                                         return (
                                             <div
                                                 key={item.id_item}
@@ -2599,11 +2920,27 @@
                                                     )}
                                                 </div>
 
-                                                <div className="pt-3 border-t border-slate-800 mt-2 flex justify-between items-center text-xs text-slate-500">
+                                                <div className="pt-3 border-t border-slate-800 mt-2 flex justify-between items-center gap-2 text-xs text-slate-500">
                                                     <span className="flex items-center gap-1 hover:text-indigo-400">
                                                         <Icon name="book-open" size={12} />
                                                         {src ? src.short_cite : <span className="text-red-900">No Source Linked</span>}
                                                     </span>
+                                                    {stageRule && (
+                                                        <button
+                                                            type="button"
+                                                            aria-label={`Assign item to ${stageRule}${stageTargetSubpart ? `, ${stageTargetSubpart}` : ''}`}
+                                                            disabled={isAssignedToActiveStage}
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
+                                                                assignItemToRule(item.id_item, stageRule, stageTargetSubpart);
+                                                            }}
+                                                            className="ml-auto shrink-0 bg-purple-900/40 border border-purple-700/60 text-purple-300 hover:bg-purple-800/60 focus:outline-none focus:ring-2 focus:ring-purple-400 px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                            title={isAssignedToActiveStage ? 'Already assigned to the active Stage' : `Assign to ${stageRule}${stageTargetSubpart ? ` › ${stageTargetSubpart}` : ''}`}
+                                                        >
+                                                            <Icon name={isAssignedToActiveStage ? 'check' : 'arrow-left'} size={10} />
+                                                            {isAssignedToActiveStage ? 'Staged' : 'Assign to Stage'}
+                                                        </button>
+                                                    )}
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -2996,7 +3333,9 @@
                                             <ExampleManager
                                                 item={items.find(i => i.id_item === selectedItemId)}
                                                 labels={labels}
-                                                onSave={(newItem) => saveItems(items.map(i => i.id_item === newItem.id_item ? newItem : i))}
+                                                onSave={(newItem) => saveItems(itemsRef.current.map(i => i.id_item === newItem.id_item ? newItem : i))}
+                                                onLocalChange={(newItem) => setItems(prev => prev.map(i => i.id_item === newItem.id_item ? newItem : i))}
+                                                noteSaveTimer={exampleNoteSaveTimer}
                                             />
 
                                             {/* --- 5. ADDITIONAL INFORMATION (collapsible) --- */}
@@ -3427,26 +3766,36 @@
                                                             title={parserCollisions.length > 0 ? 'Resolve source ID collisions before saving' : ''}
                                                             onClick={async () => {
                                                                 try {
+                                                                    await flushAllPendingDocumentSaves();
                                                                     const r = await api('save_new_document', {
                                                                         method: 'POST',
                                                                         headers: { 'Content-Type': 'application/json' },
-                                                                        body: JSON.stringify({ items: parseResult.items, sources: parseResult.sources })
+                                                                        body: JSON.stringify({
+                                                                            items: parseResult.items,
+                                                                            sources: parseResult.sources,
+                                                                            items_document: itemsDocumentRef.current,
+                                                                            sources_document: sourcesDocumentRef.current,
+                                                                        })
                                                                     });
-                                                                    const d = await r.json();
+                                                                    const d = await readApiResponse(r);
                                                                     if (d.status === 'canceled') return;
-                                                                    if (d.status !== 'success') { setParseError('Save failed: ' + (d.message || '')); return; }
                                                                     // Reload — apply full normalization same as initial fetchData
                                                                     const reload = await api('data');
-                                                                    const fresh = await reload.json();
+                                                                    const fresh = await readApiResponse(reload);
                                                                     const freshRaw = fresh.items || [];
                                                                     const freshMode = detectSchemaMode(freshRaw);
-                                                                    setSchemaMode(freshMode);
-                                                                    setItems(normalizeItems(freshRaw, freshMode));
-                                                                    setSources(fresh.sources || []);
-                                                                    setItemsFilename(d.items_filename || '');
-                                                                    setSourcesFilename(d.sources_filename || '');
+                                                                    activateItemsDocument({
+                                                                        rawItems: freshRaw,
+                                                                        filename: d.items_filename,
+                                                                        document: fresh.items_document,
+                                                                        mode: freshMode,
+                                                                    });
+                                                                    activateSourcesDocument({
+                                                                        sources: fresh.sources || [],
+                                                                        filename: d.sources_filename,
+                                                                        document: fresh.sources_document,
+                                                                    });
                                                                     setParseResult(null);
-                                                                    setView('library');
                                                                     setStatus('Saved to new file and loaded');
                                                                 } catch (e) { setParseError('Server error: ' + e.message); }
                                                             }}
@@ -3493,6 +3842,7 @@
                                                                 setParseError(null);
                                                                 setStatus('Appending import...');
                                                                 try {
+                                                                    await flushAllPendingDocumentSaves();
                                                                     const response = await api('append_import', {
                                                                         method: 'POST',
                                                                         headers: { 'Content-Type': 'application/json' },
@@ -3500,9 +3850,13 @@
                                                                             items: denormalizeItems(newItems, schemaModeRef.current),
                                                                             sources: newSources,
                                                                             imported_sources: importedSources,
+                                                                            items_document: itemsDocumentRef.current,
+                                                                            sources_document: sourcesDocumentRef.current,
                                                                         }),
                                                                     });
-                                                                    await readApiResponse(response);
+                                                                    const saved = await readApiResponse(response);
+                                                                    applyDocumentState('items', saved.items_document);
+                                                                    applyDocumentState('sources', saved.sources_document);
                                                                     undoStack.current.push([...itemsRef.current]);
                                                                     if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
                                                                     redoStack.current = [];

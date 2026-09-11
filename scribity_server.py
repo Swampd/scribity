@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import uuid
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
@@ -58,6 +59,8 @@ CORS(app)
 ITEMS_READY = False
 SOURCES_READY = False
 SAVE_LOCK = threading.RLock()
+ITEMS_DOCUMENT = {"token": uuid.uuid4().hex, "revision": 0}
+SOURCES_DOCUMENT = {"token": uuid.uuid4().hex, "revision": 0}
 
 # --- TEMPLATES BASED ON NEW SCHEMA ---
 
@@ -225,6 +228,10 @@ def json_document_error_response(error, document):
         "filename": os.path.basename(error.path),
         "path": error.path,
         "message": str(error),
+        # Keep recovery actions (New Document / Save New Document) usable even
+        # when the configured file cannot be loaded.
+        "items_document": current_document_state("items"),
+        "sources_document": current_document_state("sources"),
     }), error.status_code
 
 
@@ -236,6 +243,52 @@ def invalid_document_shape_response(error, document):
         "document": document,
         "message": str(error),
     }), 422
+
+
+def current_document_state(document):
+    """Return a copy of the active document's opaque identity and revision."""
+    state = ITEMS_DOCUMENT if document == "items" else SOURCES_DOCUMENT
+    return {"token": state["token"], "revision": state["revision"]}
+
+
+def reset_document_state(document):
+    """Invalidate requests created for the previously active file."""
+    state = ITEMS_DOCUMENT if document == "items" else SOURCES_DOCUMENT
+    state["token"] = uuid.uuid4().hex
+    state["revision"] = 0
+    return current_document_state(document)
+
+
+def advance_document_revision(document):
+    state = ITEMS_DOCUMENT if document == "items" else SOURCES_DOCUMENT
+    state["revision"] += 1
+    return current_document_state(document)
+
+
+def document_request_is_current(document, supplied):
+    """Check an optimistic-lock value while the caller holds SAVE_LOCK."""
+    if not isinstance(supplied, dict):
+        return False
+    expected = ITEMS_DOCUMENT if document == "items" else SOURCES_DOCUMENT
+    revision = supplied.get("revision")
+    return (
+        supplied.get("token") == expected["token"]
+        and isinstance(revision, int)
+        and not isinstance(revision, bool)
+        and revision == expected["revision"]
+    )
+
+
+def stale_document_response(document):
+    return jsonify({
+        "status": "error",
+        "kind": "stale_document",
+        "document": document,
+        "message": (
+            f"{document.capitalize()} were not saved because another file or "
+            "newer revision is active. Reload before editing again."
+        ),
+    }), 409
 
 
 def find_source_id_collisions(existing_sources, imported_sources):
@@ -444,28 +497,31 @@ def index():
 def get_all_data():
     """Returns both Items and Sources in one call"""
     global ITEMS_READY, SOURCES_READY
-    ITEMS_READY = False
-    SOURCES_READY = False
+    with SAVE_LOCK:
+        ITEMS_READY = False
+        SOURCES_READY = False
 
-    try:
-        items = normalize_items(load_json(ITEMS_PATH))
-    except JsonDocumentError as error:
-        return json_document_error_response(error, "items")
+        try:
+            items = normalize_items(load_json(ITEMS_PATH))
+        except JsonDocumentError as error:
+            return json_document_error_response(error, "items")
 
-    try:
-        sources = load_json(SOURCES_PATH)
-    except JsonDocumentError as error:
-        return json_document_error_response(error, "sources")
+        try:
+            sources = load_json(SOURCES_PATH)
+        except JsonDocumentError as error:
+            return json_document_error_response(error, "sources")
 
-    ITEMS_READY = True
-    SOURCES_READY = True
-    return jsonify({
-        "status": "success",
-        "items": items,
-        "sources": sources,
-        "items_filename": os.path.basename(ITEMS_PATH),
-        "sources_filename": os.path.basename(SOURCES_PATH)
-    })
+        ITEMS_READY = True
+        SOURCES_READY = True
+        return jsonify({
+            "status": "success",
+            "items": items,
+            "sources": sources,
+            "items_filename": os.path.basename(ITEMS_PATH),
+            "sources_filename": os.path.basename(SOURCES_PATH),
+            "items_document": current_document_state("items"),
+            "sources_document": current_document_state("sources"),
+        })
 
 # --- OPEN FILE PICKERS ---
 
@@ -495,15 +551,18 @@ def open_items_picker():
 
         if file_path:
             data = load_json(file_path)
-            ITEMS_PATH = file_path
-            ITEMS_READY = True
-            print(f"Switched Items file to: {ITEMS_PATH}")
-            save_config()
-            return jsonify({
-                "status": "success", 
-                "filename": os.path.basename(ITEMS_PATH),
-                "data": data
-            })
+            with SAVE_LOCK:
+                ITEMS_PATH = file_path
+                ITEMS_READY = True
+                document = reset_document_state("items")
+                print(f"Switched Items file to: {ITEMS_PATH}")
+                save_config()
+                return jsonify({
+                    "status": "success",
+                    "filename": os.path.basename(ITEMS_PATH),
+                    "data": data,
+                    "document": document,
+                })
         else:
             return jsonify({"status": "canceled"})
 
@@ -538,15 +597,18 @@ def open_sources_picker():
 
         if file_path:
             data = load_json(file_path)
-            SOURCES_PATH = file_path
-            SOURCES_READY = True
-            print(f"Switched Sources file to: {SOURCES_PATH}")
-            save_config()
-            return jsonify({
-                "status": "success", 
-                "filename": os.path.basename(SOURCES_PATH),
-                "data": data
-            })
+            with SAVE_LOCK:
+                SOURCES_PATH = file_path
+                SOURCES_READY = True
+                document = reset_document_state("sources")
+                print(f"Switched Sources file to: {SOURCES_PATH}")
+                save_config()
+                return jsonify({
+                    "status": "success",
+                    "filename": os.path.basename(SOURCES_PATH),
+                    "data": data,
+                    "document": document,
+                })
         else:
             return jsonify({"status": "canceled"})
 
@@ -567,15 +629,18 @@ def switch_items_manual():
             return jsonify({"status": "error", "message": "No path provided"})
         
         data = load_json(new_path)
-        ITEMS_PATH = new_path
-        ITEMS_READY = True
-        print(f"Switched Items file to: {ITEMS_PATH}")
-        save_config()
-        return jsonify({
-            "status": "success", 
-            "filename": os.path.basename(ITEMS_PATH),
-            "data": data
-        })
+        with SAVE_LOCK:
+            ITEMS_PATH = new_path
+            ITEMS_READY = True
+            document = reset_document_state("items")
+            print(f"Switched Items file to: {ITEMS_PATH}")
+            save_config()
+            return jsonify({
+                "status": "success",
+                "filename": os.path.basename(ITEMS_PATH),
+                "data": data,
+                "document": document,
+            })
     except JsonDocumentError as error:
         return json_document_error_response(error, "items")
     except Exception as e:
@@ -590,15 +655,18 @@ def switch_sources_manual():
             return jsonify({"status": "error", "message": "No path provided"})
         
         data = load_json(new_path)
-        SOURCES_PATH = new_path
-        SOURCES_READY = True
-        print(f"Switched Sources file to: {SOURCES_PATH}")
-        save_config()
-        return jsonify({
-            "status": "success", 
-            "filename": os.path.basename(SOURCES_PATH),
-            "data": data
-        })
+        with SAVE_LOCK:
+            SOURCES_PATH = new_path
+            SOURCES_READY = True
+            document = reset_document_state("sources")
+            print(f"Switched Sources file to: {SOURCES_PATH}")
+            save_config()
+            return jsonify({
+                "status": "success",
+                "filename": os.path.basename(SOURCES_PATH),
+                "data": data,
+                "document": document,
+            })
     except JsonDocumentError as error:
         return json_document_error_response(error, "sources")
     except Exception as e:
@@ -608,45 +676,85 @@ def switch_sources_manual():
 
 @app.route('/api/save_items', methods=['POST'])
 def save_items_endpoint():
-    if not ITEMS_READY:
-        return jsonify({
-            "status": "error",
-            "kind": "document_not_ready",
-            "document": "items",
-            "message": "Items were not saved because no valid items document is loaded.",
-        }), 409
-    new_data = request.get_json(silent=True)
+    with SAVE_LOCK:
+        if not ITEMS_READY:
+            return jsonify({
+                "status": "error",
+                "kind": "document_not_ready",
+                "document": "items",
+                "message": "Items were not saved because no valid items document is loaded.",
+            }), 409
+    payload = request.get_json(silent=True)
+    new_data = payload.get("data") if isinstance(payload, dict) else None
     try:
         validate_document_structure(new_data, "Items")
     except JsonDocumentShapeError as error:
         return invalid_document_shape_response(error, "items")
-    try:
-        # Saves to whatever the current ITEMS_PATH is (default or user-selected)
-        save_json(ITEMS_PATH, new_data)
-        return jsonify({"status": "success", "message": "Items saved"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+    with SAVE_LOCK:
+        if not ITEMS_READY:
+            return jsonify({
+                "status": "error",
+                "kind": "document_not_ready",
+                "document": "items",
+                "message": "Items were not saved because no valid items document is loaded.",
+            }), 409
+        supplied_document = {
+            "token": payload.get("document_token"),
+            "revision": payload.get("revision"),
+        }
+        if not document_request_is_current("items", supplied_document):
+            return stale_document_response("items")
+        try:
+            save_json(ITEMS_PATH, new_data)
+            document = advance_document_revision("items")
+            return jsonify({
+                "status": "success",
+                "message": "Items saved",
+                "document": document,
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/save_sources', methods=['POST'])
 def save_sources_endpoint():
-    if not SOURCES_READY:
-        return jsonify({
-            "status": "error",
-            "kind": "document_not_ready",
-            "document": "sources",
-            "message": "Sources were not saved because no valid sources document is loaded.",
-        }), 409
-    new_data = request.get_json(silent=True)
+    with SAVE_LOCK:
+        if not SOURCES_READY:
+            return jsonify({
+                "status": "error",
+                "kind": "document_not_ready",
+                "document": "sources",
+                "message": "Sources were not saved because no valid sources document is loaded.",
+            }), 409
+    payload = request.get_json(silent=True)
+    new_data = payload.get("data") if isinstance(payload, dict) else None
     try:
         validate_document_structure(new_data, "Sources")
     except JsonDocumentShapeError as error:
         return invalid_document_shape_response(error, "sources")
-    try:
-        # Saves to whatever the current SOURCES_PATH is (default or user-selected)
-        save_json(SOURCES_PATH, new_data)
-        return jsonify({"status": "success", "message": "Sources saved"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+    with SAVE_LOCK:
+        if not SOURCES_READY:
+            return jsonify({
+                "status": "error",
+                "kind": "document_not_ready",
+                "document": "sources",
+                "message": "Sources were not saved because no valid sources document is loaded.",
+            }), 409
+        supplied_document = {
+            "token": payload.get("document_token"),
+            "revision": payload.get("revision"),
+        }
+        if not document_request_is_current("sources", supplied_document):
+            return stale_document_response("sources")
+        try:
+            save_json(SOURCES_PATH, new_data)
+            document = advance_document_revision("sources")
+            return jsonify({
+                "status": "success",
+                "message": "Sources saved",
+                "document": document,
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route('/api/append_import', methods=['POST'])
@@ -678,41 +786,56 @@ def append_import():
         except JsonDocumentShapeError as error:
             return invalid_document_shape_response(error, "imported_sources")
 
-        try:
-            existing_sources = load_json(SOURCES_PATH)
-        except JsonDocumentError as error:
-            return json_document_error_response(error, "sources")
-
-        collision_ids = find_source_id_collisions(existing_sources, imported_sources)
-        if collision_ids:
+    with SAVE_LOCK:
+        if not ITEMS_READY or not SOURCES_READY:
             return jsonify({
                 "status": "error",
-                "kind": "source_id_collision",
-                "source_ids": collision_ids,
-                "message": (
-                    "Append stopped because imported source IDs conflict: "
-                    + ", ".join(collision_ids)
-                ),
+                "kind": "document_not_ready",
+                "message": "Open valid items and sources documents before appending an import.",
             }), 409
+        if not document_request_is_current("items", payload.get("items_document")):
+            return stale_document_response("items")
+        if not document_request_is_current("sources", payload.get("sources_document")):
+            return stale_document_response("sources")
 
-    try:
-        save_json_pair(
-            ITEMS_PATH,
-            items_data,
-            SOURCES_PATH,
-            sources_data,
-            require_existing_valid=True,
-        )
-        return jsonify({
-            "status": "success",
-            "message": "Import appended",
-            "items_count": len(items_data),
-            "sources_count": len(sources_data),
-        })
-    except (JsonDocumentError, ValueError) as error:
-        return jsonify({"status": "error", "message": str(error)}), 409
-    except Exception as error:
-        return jsonify({"status": "error", "message": str(error)}), 500
+        if imported_sources is not None:
+            try:
+                existing_sources = load_json(SOURCES_PATH)
+            except JsonDocumentError as error:
+                return json_document_error_response(error, "sources")
+
+            collision_ids = find_source_id_collisions(existing_sources, imported_sources)
+            if collision_ids:
+                return jsonify({
+                    "status": "error",
+                    "kind": "source_id_collision",
+                    "source_ids": collision_ids,
+                    "message": (
+                        "Append stopped because imported source IDs conflict: "
+                        + ", ".join(collision_ids)
+                    ),
+                }), 409
+
+        try:
+            save_json_pair(
+                ITEMS_PATH,
+                items_data,
+                SOURCES_PATH,
+                sources_data,
+                require_existing_valid=True,
+            )
+            return jsonify({
+                "status": "success",
+                "message": "Import appended",
+                "items_count": len(items_data),
+                "sources_count": len(sources_data),
+                "items_document": advance_document_revision("items"),
+                "sources_document": advance_document_revision("sources"),
+            })
+        except (JsonDocumentError, ValueError) as error:
+            return jsonify({"status": "error", "message": str(error)}), 409
+        except Exception as error:
+            return jsonify({"status": "error", "message": str(error)}), 500
 
 # --- SAVE AS ENDPOINTS ---
 
@@ -725,6 +848,13 @@ def save_items_as():
         validate_document_structure(new_data, "Items")
     except JsonDocumentShapeError as error:
         return invalid_document_shape_response(error, "items")
+    supplied_document = {
+        "token": payload.get("document_token"),
+        "revision": payload.get("revision"),
+    }
+    with SAVE_LOCK:
+        if not document_request_is_current("items", supplied_document):
+            return stale_document_response("items")
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
@@ -740,12 +870,20 @@ def save_items_as():
         )
         root.destroy()
         if file_path:
-            save_json(file_path, new_data)
-            ITEMS_PATH = file_path
-            ITEMS_READY = True
-            save_config()
-            print(f"Saved Items As: {ITEMS_PATH}")
-            return jsonify({"status": "success", "filename": os.path.basename(file_path)})
+            with SAVE_LOCK:
+                if not document_request_is_current("items", supplied_document):
+                    return stale_document_response("items")
+                save_json(file_path, new_data)
+                ITEMS_PATH = file_path
+                ITEMS_READY = True
+                document = reset_document_state("items")
+                save_config()
+                print(f"Saved Items As: {ITEMS_PATH}")
+                return jsonify({
+                    "status": "success",
+                    "filename": os.path.basename(file_path),
+                    "document": document,
+                })
         return jsonify({"status": "canceled"})
     except Exception as e:
         print(e)
@@ -760,6 +898,13 @@ def save_sources_as():
         validate_document_structure(new_data, "Sources")
     except JsonDocumentShapeError as error:
         return invalid_document_shape_response(error, "sources")
+    supplied_document = {
+        "token": payload.get("document_token"),
+        "revision": payload.get("revision"),
+    }
+    with SAVE_LOCK:
+        if not document_request_is_current("sources", supplied_document):
+            return stale_document_response("sources")
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
@@ -775,12 +920,20 @@ def save_sources_as():
         )
         root.destroy()
         if file_path:
-            save_json(file_path, new_data)
-            SOURCES_PATH = file_path
-            SOURCES_READY = True
-            save_config()
-            print(f"Saved Sources As: {SOURCES_PATH}")
-            return jsonify({"status": "success", "filename": os.path.basename(file_path)})
+            with SAVE_LOCK:
+                if not document_request_is_current("sources", supplied_document):
+                    return stale_document_response("sources")
+                save_json(file_path, new_data)
+                SOURCES_PATH = file_path
+                SOURCES_READY = True
+                document = reset_document_state("sources")
+                save_config()
+                print(f"Saved Sources As: {SOURCES_PATH}")
+                return jsonify({
+                    "status": "success",
+                    "filename": os.path.basename(file_path),
+                    "document": document,
+                })
         return jsonify({"status": "canceled"})
     except Exception as e:
         print(e)
@@ -793,6 +946,14 @@ def new_document():
     """Open two save-as dialogs, write empty JSON arrays to both paths,
     then switch globals — both or neither (cancel-safe)."""
     global ITEMS_PATH, SOURCES_PATH, ITEMS_READY, SOURCES_READY
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"status": "error", "message": "Expected a JSON object."}), 400
+    with SAVE_LOCK:
+        if not document_request_is_current("items", payload.get("items_document")):
+            return stale_document_response("items")
+        if not document_request_is_current("sources", payload.get("sources_document")):
+            return stale_document_response("sources")
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
@@ -822,20 +983,29 @@ def new_document():
         if not sources_path:
             return jsonify({"status": "canceled"})
 
-        # Commit both empty documents, then update globals.
-        save_json_pair(items_path, [], sources_path, [])
-        ITEMS_PATH   = items_path
-        SOURCES_PATH = sources_path
-        ITEMS_READY = True
-        SOURCES_READY = True
-        save_config()
-        print(f"New empty document created — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
+        with SAVE_LOCK:
+            if not document_request_is_current("items", payload.get("items_document")):
+                return stale_document_response("items")
+            if not document_request_is_current("sources", payload.get("sources_document")):
+                return stale_document_response("sources")
+            # Commit both empty documents, then update globals.
+            save_json_pair(items_path, [], sources_path, [])
+            ITEMS_PATH   = items_path
+            SOURCES_PATH = sources_path
+            ITEMS_READY = True
+            SOURCES_READY = True
+            items_document = reset_document_state("items")
+            sources_document = reset_document_state("sources")
+            save_config()
+            print(f"New empty document created — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
 
-        return jsonify({
-            "status": "success",
-            "items_filename":   os.path.basename(items_path),
-            "sources_filename": os.path.basename(sources_path)
-        })
+            return jsonify({
+                "status": "success",
+                "items_filename":   os.path.basename(items_path),
+                "sources_filename": os.path.basename(sources_path),
+                "items_document": items_document,
+                "sources_document": sources_document,
+            })
     except ValueError as e:
         return jsonify({
             "status": "error",
@@ -861,6 +1031,11 @@ def save_new_document():
             validate_document_structure(data, name.capitalize())
         except JsonDocumentShapeError as error:
             return invalid_document_shape_response(error, name)
+    with SAVE_LOCK:
+        if not document_request_is_current("items", payload.get("items_document")):
+            return stale_document_response("items")
+        if not document_request_is_current("sources", payload.get("sources_document")):
+            return stale_document_response("sources")
     if not TK_AVAILABLE:
         return jsonify({"status": "gui_unavailable", "message": "Tkinter not found"})
     try:
@@ -892,20 +1067,29 @@ def save_new_document():
         if not sources_path:
             return jsonify({"status": "canceled"})
 
-        # Both paths confirmed — commit both files, THEN update globals.
-        save_json_pair(items_path, items_data, sources_path, sources_data)
-        ITEMS_PATH   = items_path
-        SOURCES_PATH = sources_path
-        ITEMS_READY = True
-        SOURCES_READY = True
-        save_config()
-        print(f"New document saved — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
+        with SAVE_LOCK:
+            if not document_request_is_current("items", payload.get("items_document")):
+                return stale_document_response("items")
+            if not document_request_is_current("sources", payload.get("sources_document")):
+                return stale_document_response("sources")
+            # Both paths confirmed — commit both files, THEN update globals.
+            save_json_pair(items_path, items_data, sources_path, sources_data)
+            ITEMS_PATH   = items_path
+            SOURCES_PATH = sources_path
+            ITEMS_READY = True
+            SOURCES_READY = True
+            items_document = reset_document_state("items")
+            sources_document = reset_document_state("sources")
+            save_config()
+            print(f"New document saved — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
 
-        return jsonify({
-            "status": "success",
-            "items_filename":   os.path.basename(items_path),
-            "sources_filename": os.path.basename(sources_path)
-        })
+            return jsonify({
+                "status": "success",
+                "items_filename":   os.path.basename(items_path),
+                "sources_filename": os.path.basename(sources_path),
+                "items_document": items_document,
+                "sources_document": sources_document,
+            })
     except ValueError as e:
         return jsonify({
             "status": "error",
