@@ -188,3 +188,30 @@ test('keyboard access changes the sidebar width and example flag', async ({ page
   await expect(checkbox).toBeChecked();
   await expect.poll(() => state.items.a[0].contains_example).toBe(true);
 });
+
+test('research documents accept numeric hierarchy numbers', async ({ page }) => {
+  const state = useFakeDocuments(page);
+  state.items.a = [
+    {
+      ...state.items.a[0],
+      category_part_name: ['Origins'],
+      category_part_number: [1],
+      subpart_name: ['Early planning'],
+      subpart_number: [1],
+    },
+    {
+      id_item: 'item-a-2',
+      quote_original: 'Document A second item',
+      contains_example: false,
+      category_part_name: ['Expansion'],
+      category_part_number: [2],
+      subpart_name: ['Rail connection'],
+      subpart_number: [1],
+    },
+  ];
+
+  await page.goto(baseURL);
+
+  await expect(page.getByText('Document A original', { exact: false })).toBeVisible();
+  await expect(page.getByText('Origins', { exact: true })).toBeVisible();
+});

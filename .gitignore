@@ -27,3 +27,5 @@ desktop.ini
 node_modules/
 playwright-report/
 test-results/
+output/playwright/
+.playwright-cli/

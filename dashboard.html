@@ -1537,11 +1537,11 @@
 
                 // Convert to array and sort: numbered rules first, then alphabetical
                 const hierarchy = Array.from(ruleMap.values())
-                    .map(r => ({ ...r, subparts: Array.from(r.subparts.values()).sort((a, b) => (a.number || a.name).localeCompare(b.number || b.name, undefined, { numeric: true, sensitivity: 'base' })) }))
+                    .map(r => ({ ...r, subparts: Array.from(r.subparts.values()).sort((a, b) => String(a.number || a.name).localeCompare(String(b.number || b.name), undefined, { numeric: true, sensitivity: 'base' })) }))
                     .sort((a, b) => {
                         if (a.number && !b.number) return -1;
                         if (!a.number && b.number) return 1;
-                        if (a.number && b.number) return a.number.localeCompare(b.number, undefined, { numeric: true, sensitivity: 'base' });
+                        if (a.number && b.number) return String(a.number).localeCompare(String(b.number), undefined, { numeric: true, sensitivity: 'base' });
                         return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
                     });
 
