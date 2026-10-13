@@ -92,6 +92,16 @@ class ScribityServerTestCase(unittest.TestCase):
         }
 
 
+class CorsPolicyTests(ScribityServerTestCase):
+    def test_arbitrary_web_origin_is_not_granted_api_access(self):
+        response = self.client.get(
+            "/api/data",
+            headers={"Origin": "https://attacker.example"},
+        )
+
+        self.assertNotIn("Access-Control-Allow-Origin", response.headers)
+
+
 class StrictJsonLoadingTests(ScribityServerTestCase):
     def test_missing_file_raises_without_creating_it(self):
         missing_path = self.path("missing.json")
@@ -618,6 +628,54 @@ class ParserAppendSaveTests(ScribityServerTestCase):
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
 
+    def test_import_save_writes_a_non_overwriting_pair_beside_selected_reports(self):
+        existing_items_path = self.write_text(
+            "scribity_items.json",
+            '[{"id_item": "keep-me"}]\n',
+        )
+        startup_items_path = server.ITEMS_PATH
+        startup_sources_path = server.SOURCES_PATH
+        server.save_config()
+        items_document = server.current_document_state("items")
+        sources_document = server.current_document_state("sources")
+
+        with mock.patch.object(server, "tk", create=True) as tk_module, \
+                mock.patch.object(server, "filedialog", create=True) as file_dialog:
+            response = self.client.post(
+                "/api/save_import_document",
+                json={
+                    "items": [{"id_item": "imported"}],
+                    "sources": [{"id_source": "imported-source"}],
+                    "selected_path": self.temp_dir.name,
+                    "items_document": items_document,
+                    "sources_document": sources_document,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        expected_items_path = os.path.realpath(self.path("scribity_items_2.json"))
+        expected_sources_path = os.path.realpath(self.path("scribity_sources_2.json"))
+        self.assertEqual(payload["items_path"], expected_items_path)
+        self.assertEqual(payload["sources_path"], expected_sources_path)
+        self.assertEqual(self.read_json(expected_items_path), [{"id_item": "imported"}])
+        self.assertEqual(
+            self.read_json(expected_sources_path),
+            [{"id_source": "imported-source"}],
+        )
+        self.assertEqual(
+            self.read_json(existing_items_path),
+            [{"id_item": "keep-me"}],
+        )
+        self.assertEqual(server.ITEMS_PATH, expected_items_path)
+        self.assertEqual(server.SOURCES_PATH, expected_sources_path)
+        with open(server.CONFIG_PATH, "r", encoding="utf-8") as handle:
+            startup_config = json.load(handle)
+        self.assertEqual(startup_config["items_path"], startup_items_path)
+        self.assertEqual(startup_config["sources_path"], startup_sources_path)
+        tk_module.Tk.assert_not_called()
+        file_dialog.asksaveasfilename.assert_not_called()
+
     def test_append_import_saves_both_completed_snapshots(self):
         new_items = self.original_items + [{"id_item": "imported"}]
         new_sources = self.original_sources + [{"id_source": "imported-source"}]
@@ -767,7 +825,12 @@ class ServerStartupConfigurationTests(unittest.TestCase):
         self.assertIsNotNone(options_builder)
         self.assertEqual(
             options_builder({}),
-            {"port": server.PORT, "debug": False, "use_reloader": False},
+            {
+                "port": server.PORT,
+                "debug": False,
+                "use_reloader": False,
+                "threaded": False,
+            },
         )
 
     def test_debug_environment_flag_enables_development_mode(self):
@@ -778,7 +841,12 @@ class ServerStartupConfigurationTests(unittest.TestCase):
             with self.subTest(flag=flag):
                 self.assertEqual(
                     options_builder({"SCRIBITY_DEBUG": flag}),
-                    {"port": server.PORT, "debug": True, "use_reloader": True},
+                    {
+                        "port": server.PORT,
+                        "debug": True,
+                        "use_reloader": True,
+                        "threaded": False,
+                    },
                 )
 
     def test_unrecognized_debug_value_stays_disabled(self):
@@ -787,7 +855,12 @@ class ServerStartupConfigurationTests(unittest.TestCase):
         self.assertIsNotNone(options_builder)
         self.assertEqual(
             options_builder({"SCRIBITY_DEBUG": "sometimes"}),
-            {"port": server.PORT, "debug": False, "use_reloader": False},
+            {
+                "port": server.PORT,
+                "debug": False,
+                "use_reloader": False,
+                "threaded": False,
+            },
         )
 
 

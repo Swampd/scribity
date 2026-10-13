@@ -9,6 +9,7 @@ WIP/
 admin/
 
 # === Python ===
+.venv/
 __pycache__/
 *.pyc
 *.pyo

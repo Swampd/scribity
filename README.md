@@ -22,7 +22,7 @@ Scribity keeps research documents on the user's computer and combines source man
 
 ## Technology
 
-- Python, Flask, and Flask-CORS for the local server and file operations
+- Python and Flask for the local server and file operations
 - React 18, Tailwind CSS, and Lucide for the browser interface
 - Python `unittest` and Playwright for automated regression coverage
 - JSON documents for portable, inspectable storage
@@ -113,3 +113,51 @@ Copyright © 2026 Casey Auttonberry. All rights reserved.
 
 No open-source license is granted for Scribity at this time. The source is visible for portfolio and evaluation purposes; see [COPYRIGHT.md](COPYRIGHT.md) for details. Third-party libraries remain subject to their respective licenses.
 
+### Create an episode project from selected research
+
+For the episode-selection workflow, open **Draft → Create project from Draft**.
+Your existing Draft is already the selection; you do not need to check cards.
+The copied research goes into the new project’s Library, with an empty Draft
+ready for a fresh story order. The original project and Draft remain intact.
+
+You can also use **+ → Create project from selection**. Choose the entire current Draft,
+checked Library items (including checks hidden by filters), or current filtered
+Library results. The dialog describes the scope; Draft selection ignores search,
+category, quick filters, and the Draft part filter. Supporting descendants are
+always included recursively, even when their `id_script` is zero.
+
+1. Choose **Start with an empty Draft** (default) or **Preserve existing Draft
+   order**. Empty resets only `id_script`; preserve retains existing values and
+   never adds otherwise undrafted items to Draft.
+2. Click **Preview project**. Pending edits are saved first. Review selected,
+   additional supporting, total item, and source counts, plus any relationship
+   notices. No relevance filtering or narrative reordering is performed.
+3. Click **Save new project…** and choose two new JSON filenames. Alternatively,
+   enter two absolute paths in existing folders. Neither active originals nor
+   other existing files can be overwritten. Canceling either dialog writes
+   neither file. A failed paired write rolls back the newly created first file.
+4. After both files save, choose **Open new project**, or **Done — keep original
+   open**. Opening activates the pair together and saves it as the next-start
+   project. Ordinary Save As and rendered script exports are unchanged.
+
+Research fields, IDs, notes, citations, category order, tags, script parts, and
+unknown metadata are copied. `nested_under` is the structural support link.
+Selected children whose parents are absent become top-level items in the copy;
+the original link is recorded in `_scribity_external_references`. Item links in
+`related_facts`, `supports`, and `contradicts` that point outside the copy (or are
+unresolved) are likewise moved into that provenance list and disclosed in the
+preview. Parser-generated `grp_*` multi-citation group labels stay intact; they
+do not expand the selection. Generic extra-ID fields and other metadata remain
+opaque and unchanged. Warnings must be acknowledged before saving.
+
+Missing referenced source records, conflicting duplicate source IDs, support
+cycles, and ambiguous item IDs block extraction with an explanation. Identical
+source duplicates are included once. Blank source IDs remain blank. Source
+bibliography links and URLs are preserved without pulling in unrelated records.
+
+Previews expire after 30 minutes or a server restart (at most 16 are retained).
+Edits, file switches, or external file changes invalidate an unsaved preview;
+create a fresh one. Saved files remain available after a preview expires and can
+be opened through the ordinary Items/Sources controls. Publication uses atomic
+no-overwrite hard links to staged files; a filesystem without hard-link support
+will fail safely, in which case save to a local folder that supports them.

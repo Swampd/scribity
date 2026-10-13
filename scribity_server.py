@@ -4,6 +4,8 @@ Scribity Server — py scribity_server.py
 """
 
 import json
+import hashlib
+import time
 import os
 import shutil
 import sys
@@ -11,7 +13,7 @@ import tempfile
 import threading
 import uuid
 from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
+from project_extraction import build_project
 
 # --- ATTEMPT TO LOAD GUI LIB ---
 TK_AVAILABLE = False
@@ -42,6 +44,10 @@ def server_run_options(environ=None):
         'port': PORT,
         'debug': debug_enabled,
         'use_reloader': debug_enabled,
+        # Tk/Cocoa windows must be created on macOS's main thread. Scribity is
+        # a single-user local app, so serialize requests to keep file dialogs
+        # on the server's main thread instead of Flask worker threads.
+        'threaded': False,
     }
 
 # Default file paths — relative to the server script.
@@ -52,7 +58,6 @@ ITEMS_PATH   = DEFAULT_ITEMS_PATH
 SOURCES_PATH = DEFAULT_SOURCES_PATH
 
 app = Flask(__name__)
-CORS(app)
 
 # Saves are allowed only after the corresponding document has loaded successfully
 # or has been created explicitly through a save/new-document action.
@@ -88,6 +93,7 @@ ITEM_TEMPLATE = {
   "short_cite": "",
   "url": "",
   "script_part": "",
+  "nested_under": "",
   "edit_tags": "",
   "relevance_tags": [],
   "needs_verification": False,
@@ -394,6 +400,7 @@ def save_json_pair(
     sources_data,
     *,
     require_existing_valid=False,
+    require_new=False,
 ):
     """Stage and commit two documents, rolling items back if sources fail."""
     validate_document_structure(items_data, "Items")
@@ -402,6 +409,26 @@ def save_json_pair(
         raise ValueError("Items and sources must use different files.")
 
     with SAVE_LOCK:
+        if require_new:
+            # Hard links publish staged files atomically without ever replacing an
+            # existing destination (including a symlink or a racing writer).
+            staged_items = staged_sources = None
+            installed_items = False
+            try:
+                staged_items = stage_json(items_path, items_data)
+                staged_sources = stage_json(sources_path, sources_data)
+                os.link(staged_items, items_path)
+                installed_items = True
+                os.link(staged_sources, sources_path)
+            except Exception:
+                if installed_items:
+                    os.unlink(items_path)
+                raise
+            finally:
+                for temporary in (staged_items, staged_sources):
+                    if temporary and os.path.exists(temporary):
+                        os.unlink(temporary)
+            return
         if require_existing_valid:
             load_json(items_path)
             load_json(sources_path)
@@ -1100,7 +1127,254 @@ def save_new_document():
         print(e)
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# --- PROJECT EXTRACTION ---
+
+# Bounded, expiring snapshots. Preview and save use exactly the same data.
+PROJECT_PREVIEWS = {}
+PROJECT_PREVIEW_TTL = 30 * 60
+
+
+def project_fingerprint(items, sources):
+    return hashlib.sha256(json.dumps([items, sources], sort_keys=True,
+                                    ensure_ascii=False).encode('utf-8')).hexdigest()
+
+
+def project_session_error(payload):
+    for document in ('items', 'sources'):
+        if not document_request_is_current(document, payload.get(document + '_document')):
+            return stale_document_response(document)
+    if not ITEMS_READY or not SOURCES_READY:
+        return jsonify(status='error', message='Open valid items and sources first.'), 409
+    return None
+
+
+def project_preview_record(token):
+    record = PROJECT_PREVIEWS.get(token) if isinstance(token, str) else None
+    if not record or time.monotonic() - record['created'] > PROJECT_PREVIEW_TTL:
+        raise ValueError('This project preview expired. Close it and create a fresh preview.')
+    return record
+
+
+def project_origin_error(record):
+    error = project_session_error(record)
+    if error is not None:
+        return error
+    fingerprint = project_fingerprint(load_json(ITEMS_PATH), load_json(SOURCES_PATH))
+    if fingerprint != record['origin_fingerprint']:
+        return jsonify(status='error', kind='stale_document',
+                       message='Research files changed after preview. Create a fresh preview.'), 409
+    return None
+
+
+@app.route('/api/preview_project', methods=['POST'])
+def preview_project():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(status='error', message='Expected a JSON object.'), 400
+    try:
+        with SAVE_LOCK:
+            error = project_session_error(payload)
+            if error is not None:
+                return error
+            # The UI flushes edits before this point. Read original schema and
+            # unknown metadata directly, without normalization or reconstruction.
+            items, sources = load_json(ITEMS_PATH), load_json(SOURCES_PATH)
+            project = build_project(items, sources, payload.get('scope', 'draft'),
+                                    payload.get('selected_ids'), payload.get('empty_draft', True))
+            now = time.monotonic()
+            for key, record in list(PROJECT_PREVIEWS.items()):
+                if now - record['created'] > PROJECT_PREVIEW_TTL:
+                    del PROJECT_PREVIEWS[key]
+            while len(PROJECT_PREVIEWS) >= 16:
+                del PROJECT_PREVIEWS[next(iter(PROJECT_PREVIEWS))]
+            token = uuid.uuid4().hex
+            PROJECT_PREVIEWS[token] = {
+                **project, 'created': now,
+                'items_document': current_document_state('items'),
+                'sources_document': current_document_state('sources'),
+                'origin_fingerprint': project_fingerprint(items, sources),
+                'origin_paths': [ITEMS_PATH, SOURCES_PATH],
+            }
+            return jsonify(status='success', preview_token=token,
+                           counts=project['counts'], warnings=project['warnings'], errors=project['errors'])
+    except (ValueError, JsonDocumentError) as error:
+        return jsonify(status='error', message=str(error)), 422
+    except Exception as error:
+        return jsonify(status='error', message=str(error)), 500
+
+
+@app.route('/api/save_project', methods=['POST'])
+def save_project():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify(status='error', message='Expected a JSON object.'), 400
+    try:
+        with SAVE_LOCK:
+            record = project_preview_record(payload.get('preview_token'))
+            if record.get('saved'):
+                return jsonify(status='success', **record['saved'])
+            error = project_origin_error(record)
+            if error is not None:
+                return error
+            if record['errors']:
+                raise ValueError('Resolve the preview errors before saving.')
+        items_path, sources_path = payload.get('items_path'), payload.get('sources_path')
+        if not items_path and not sources_path:
+            if not TK_AVAILABLE:
+                return jsonify(status='gui_unavailable', message='Enter two new absolute file paths below.')
+            root = tk.Tk()
+            try:
+                root.withdraw()
+                root.wm_attributes('-topmost', 1)
+                items_path = filedialog.asksaveasfilename(
+                    title='Create project — new Items file (1 of 2)',
+                    initialdir=os.path.dirname(record['origin_paths'][0]),
+                    initialfile='episode_items.json', defaultextension='.json',
+                    filetypes=(("JSON files", "*.json"),))
+                if not items_path:
+                    return jsonify(status='canceled')
+                sources_path = filedialog.asksaveasfilename(
+                    title='Create project — new Sources file (2 of 2)',
+                    initialdir=os.path.dirname(items_path), initialfile='episode_sources.json',
+                    defaultextension='.json', filetypes=(("JSON files", "*.json"),))
+                if not sources_path:
+                    return jsonify(status='canceled')
+            finally:
+                root.destroy()
+        if any(not isinstance(p, str) or not os.path.isabs(p) for p in (items_path, sources_path)):
+            raise ValueError('Enter two absolute paths for the new items and sources files.')
+        with SAVE_LOCK:
+            # Dialogs can stay open while another tab saves or switches files.
+            record = project_preview_record(payload.get('preview_token'))
+            if record.get('saved'):
+                return jsonify(status='success', **record['saved'])
+            error = project_origin_error(record)
+            if error is not None:
+                return error
+            for path in (items_path, sources_path):
+                if any(paths_refer_to_same_file(path, original) for original in
+                       [ITEMS_PATH, SOURCES_PATH, *record['origin_paths']]):
+                    raise ValueError('The new project cannot overwrite either active original.')
+                if os.path.lexists(path):
+                    raise ValueError('Choose new filenames; project extraction never overwrites existing files.')
+            save_json_pair(items_path, record['items'], sources_path, record['sources'], require_new=True)
+            saved = {'project_token': payload['preview_token'],
+                     'items_path': items_path, 'sources_path': sources_path}
+            record['saved'] = saved
+            return jsonify(status='success', **saved)
+    except (ValueError, JsonDocumentError) as error:
+        return jsonify(status='error', message=str(error)), 422
+    except Exception as error:
+        return jsonify(status='error', message=str(error)), 500
+
+
+@app.route('/api/open_project', methods=['POST'])
+def open_project():
+    """Activate an already saved pair together, only after both validate."""
+    global ITEMS_PATH, SOURCES_PATH, ITEMS_READY, SOURCES_READY
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify(status='error', message='Expected a JSON object.'), 400
+    try:
+        with SAVE_LOCK:
+            error = project_session_error(payload)
+            if error is not None:
+                return error
+            record = project_preview_record(payload.get('project_token'))
+            saved = record.get('saved')
+            if not saved:
+                raise ValueError('Save both project files before opening them.')
+            items, sources = load_json(saved['items_path']), load_json(saved['sources_path'])
+            if project_fingerprint(items, sources) != project_fingerprint(record['items'], record['sources']):
+                raise ValueError('The saved project changed. Open its files using the ordinary file controls.')
+            # Persist the pair before activation; a config write failure leaves the
+            # current paths, readiness, and session tokens untouched.
+            save_json(CONFIG_PATH, {'items_path': saved['items_path'], 'sources_path': saved['sources_path']})
+            ITEMS_PATH, SOURCES_PATH = saved['items_path'], saved['sources_path']
+            ITEMS_READY = SOURCES_READY = True
+            return jsonify(status='success', items=items, sources=sources,
+                           items_filename=os.path.basename(ITEMS_PATH), sources_filename=os.path.basename(SOURCES_PATH),
+                           items_document=reset_document_state('items'), sources_document=reset_document_state('sources'))
+    except (ValueError, JsonDocumentError) as error:
+        return jsonify(status='error', message=str(error)), 422
+    except Exception as error:
+        return jsonify(status='error', message=str(error)), 500
+
+
 # --- DRR PARSER ENDPOINTS ---
+
+
+def next_available_import_paths(selected_path):
+    """Return a new items/sources filename pair beside the selected reports."""
+    if not isinstance(selected_path, str) or not selected_path.strip():
+        raise ValueError("The selected report path is missing.")
+
+    selected_path = os.path.realpath(selected_path)
+    if os.path.isdir(selected_path):
+        destination_dir = selected_path
+    elif os.path.isfile(selected_path):
+        destination_dir = os.path.dirname(selected_path)
+    else:
+        raise ValueError("The selected report path no longer exists.")
+
+    suffix = ""
+    sequence = 1
+    while True:
+        items_path = os.path.join(destination_dir, f"scribity_items{suffix}.json")
+        sources_path = os.path.join(destination_dir, f"scribity_sources{suffix}.json")
+        if not os.path.exists(items_path) and not os.path.exists(sources_path):
+            return items_path, sources_path
+        sequence += 1
+        suffix = f"_{sequence}"
+
+
+@app.route('/api/save_import_document', methods=['POST'])
+def save_import_document():
+    """Save parsed DRR data beside its reports without opening native dialogs."""
+    global ITEMS_PATH, SOURCES_PATH, ITEMS_READY, SOURCES_READY
+    payload = request.get_json(silent=True)
+    items_data = payload.get('items') if isinstance(payload, dict) else None
+    sources_data = payload.get('sources') if isinstance(payload, dict) else None
+
+    for name, data in (("items", items_data), ("sources", sources_data)):
+        try:
+            validate_document_structure(data, name.capitalize())
+        except JsonDocumentShapeError as error:
+            return invalid_document_shape_response(error, name)
+
+    try:
+        with SAVE_LOCK:
+            if not document_request_is_current("items", payload.get("items_document")):
+                return stale_document_response("items")
+            if not document_request_is_current("sources", payload.get("sources_document")):
+                return stale_document_response("sources")
+
+            items_path, sources_path = next_available_import_paths(
+                payload.get("selected_path")
+            )
+            save_json_pair(items_path, items_data, sources_path, sources_data)
+            ITEMS_PATH = items_path
+            SOURCES_PATH = sources_path
+            ITEMS_READY = True
+            SOURCES_READY = True
+            items_document = reset_document_state("items")
+            sources_document = reset_document_state("sources")
+
+        print(f"Imported document saved — Items: {ITEMS_PATH} | Sources: {SOURCES_PATH}")
+        return jsonify({
+            "status": "success",
+            "items_path": items_path,
+            "sources_path": sources_path,
+            "items_filename": os.path.basename(items_path),
+            "sources_filename": os.path.basename(sources_path),
+            "items_document": items_document,
+            "sources_document": sources_document,
+        })
+    except ValueError as error:
+        return jsonify({"status": "error", "message": str(error)}), 422
+    except Exception as error:
+        print(error)
+        return jsonify({"status": "error", "message": str(error)}), 500
 
 
 try:

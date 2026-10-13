@@ -16,16 +16,23 @@ import webbrowser
 
 PORT = 8000
 URL = f"http://localhost:{PORT}"
+MACOS_APP = "/Applications/Scribity.app"
 
 
 def open_browser():
     time.sleep(2)
+    if sys.platform == "darwin" and os.path.isdir(MACOS_APP):
+        subprocess.run(["open", MACOS_APP], check=False)
+        return
     webbrowser.open(URL)
 
 
 def main():
     app_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(app_dir)
+
+    venv_python = os.path.join(app_dir, ".venv", "bin", "python")
+    runtime_python = venv_python if os.path.isfile(venv_python) else sys.executable
 
     print("============================================")
     print("       SCRIBITY - Starting Up...")
@@ -39,7 +46,7 @@ def main():
 
     server_path = os.path.join(app_dir, "scribity_server.py")
     try:
-        subprocess.run([sys.executable, server_path], check=False)
+        subprocess.run([runtime_python, server_path], check=False)
     except KeyboardInterrupt:
         print("\nScribity stopped.")
 

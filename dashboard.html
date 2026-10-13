@@ -31,6 +31,53 @@
             font-family: -apple-system, system-ui, sans-serif;
         }
 
+        button {
+            min-inline-size: 1.75rem;
+            min-block-size: 1.75rem;
+        }
+
+        /* Card actions stay legible even when the icon CDN is unavailable. */
+        .card-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            width: 100%;
+        }
+
+        .card-action {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            min-height: 32px;
+            min-width: 32px;
+            padding: 4px 9px;
+            border: 1px solid #94a3b8;
+            border-radius: 6px;
+            background: #334155;
+            color: #f8fafc;
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 20px;
+            white-space: nowrap;
+            cursor: pointer;
+        }
+
+        .card-action:hover { background: #475569; }
+        .card-action[aria-pressed="true"] {
+            background: #78350f;
+            border-color: #fbbf24;
+            color: #fef3c7;
+        }
+        .card-action:disabled {
+            background: #1e293b;
+            color: #cbd5e1;
+            border-color: #64748b;
+            border-style: dashed;
+            cursor: not-allowed;
+            opacity: 1;
+        }
+
         .custom-input {
             background: #1e293b;
             border: 1px solid #334155;
@@ -42,14 +89,46 @@
         }
 
         .custom-input:focus {
-            outline: none;
             border-color: #60a5fa;
-            ring: 1px solid #60a5fa;
+            outline: 2px solid #60a5fa;
+            outline-offset: 2px;
+            box-shadow: 0 0 0 1px #60a5fa;
+        }
+
+        button:focus-visible,
+        input:focus-visible,
+        select:focus-visible,
+        textarea:focus-visible,
+        [role="separator"]:focus-visible {
+            outline: 2px solid #60a5fa !important;
+            outline-offset: 2px !important;
+        }
+
+        .group:focus-within .reveal-action {
+            opacity: 1;
+        }
+
+        .library-delete {
+            flex-shrink: 0;
+            width: max-content;
+            max-width: 100%;
+            min-inline-size: 0;
+            white-space: nowrap;
+        }
+
+        .library-delete > span {
+            flex-shrink: 0;
+        }
+
+        @media (hover: none), (pointer: coarse) {
+            .reveal-action {
+                opacity: 1 !important;
+            }
         }
 
         .custom-label {
             display: block;
-            font-size: 0.65rem;
+            font-size: 0.75rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: #94a3b8;
@@ -174,7 +253,23 @@
     <div id="root" class="h-full"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useMemo, useRef, useCallback } = React;
+        const { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } = React;
+
+        // These essential controls use local SVGs, independent of the icon CDN.
+        const CardActionIcon = ({ name }) => (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                aria-hidden="true" focusable="false">
+                {name === 'edit' && <path d="M16 3a2.12 2.12 0 0 1 3 3L7 18l-4 1 1-4L16 3ZM14 5l3 3" />}
+                {name === 'support' && <g>
+                    <path d="M8 12h8M2 10v4M22 10v4" />
+                    <rect x="4" y="6" width="4" height="12" rx="1" />
+                    <rect x="16" y="6" width="4" height="12" rx="1" />
+                </g>}
+                {name === 'up' && <path d="M12 19V5M5 12l7-7 7 7" />}
+                {name === 'down' && <path d="M12 5v14M5 12l7 7 7-7" />}
+            </svg>
+        );
 
         // --- ICON COMPONENT ---
         const Icon = ({ name, size = 16, className = "" }) => {
@@ -185,6 +280,164 @@
                 return null;
             }, [name, size, className]);
             return svgHtml ? <span dangerouslySetInnerHTML={{ __html: svgHtml }} className="inline-flex items-center justify-center" /> : null;
+        };
+
+        // Keep the normal label size unless the card itself cannot contain it.
+        const LibraryDeleteButton = ({ onClick }) => {
+            const buttonRef = useRef(null);
+            const labelRef = useRef(null);
+
+            useLayoutEffect(() => {
+                const button = buttonRef.current;
+                const label = labelRef.current;
+                const footer = button.parentElement;
+                const fit = () => {
+                    label.style.fontSize = '';
+                    const style = getComputedStyle(button);
+                    const naturalWidth = label.getBoundingClientRect().width;
+                    const icon = button.querySelector('svg');
+                    const iconSpace = icon ? icon.parentElement.getBoundingClientRect().width + parseFloat(style.columnGap) : 0;
+                    const available = button.getBoundingClientRect().width
+                        - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+                        - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth) - iconSpace;
+                    if (naturalWidth > available && available > 0) {
+                        // Measure the actual glyphs: font hinting is not perfectly
+                        // proportional, so a width ratio can still leave overflow.
+                        let low = 0;
+                        let high = parseFloat(style.fontSize);
+                        for (let step = 0; step < 12; step++) {
+                            const size = (low + high) / 2;
+                            label.style.fontSize = `${size}px`;
+                            if (label.getBoundingClientRect().width <= available) low = size;
+                            else high = size;
+                        }
+                        label.style.fontSize = `${low}px`;
+                    }
+                };
+                let previousWidth;
+                const observer = new ResizeObserver(([entry]) => {
+                    if (entry.contentRect.width === previousWidth) return;
+                    previousWidth = entry.contentRect.width;
+                    fit();
+                });
+                observer.observe(footer);
+                window.addEventListener('resize', fit);
+                document.fonts.addEventListener('loadingdone', fit);
+                fit();
+                return () => {
+                    observer.disconnect();
+                    window.removeEventListener('resize', fit);
+                    document.fonts.removeEventListener('loadingdone', fit);
+                };
+            }, []);
+
+            return (
+                <button ref={buttonRef} type="button" onClick={onClick}
+                    className="library-delete reveal-action opacity-0 group-hover:opacity-100 bg-red-900/50 border border-red-700 text-red-400 hover:bg-red-800 px-2 py-1 rounded text-xs font-bold flex items-center gap-1 transition-opacity">
+                    <Icon name="trash-2" size={10} />
+                    <span ref={labelRef}>DELETE</span>
+                </button>
+            );
+        };
+
+        const MODAL_FOCUSABLE_SELECTOR = [
+            'button:not([disabled])',
+            '[href]',
+            'input:not([disabled])',
+            'select:not([disabled])',
+            'textarea:not([disabled])',
+            '[tabindex]:not([tabindex="-1"])',
+        ].join(',');
+
+        const AccessibleModal = ({
+            open,
+            onClose,
+            labelledBy,
+            describedBy,
+            returnFocusRef,
+            overlayClassName = 'z-[110] bg-black/60 backdrop-blur-sm px-4',
+            panelClassName,
+            children,
+        }) => {
+            const dialogRef = useRef(null);
+            const previousFocusRef = useRef(null);
+            const onCloseRef = useRef(onClose);
+            onCloseRef.current = onClose;
+
+            useEffect(() => {
+                if (!open) return undefined;
+
+                previousFocusRef.current = returnFocusRef?.current || document.activeElement;
+                const dialog = dialogRef.current;
+                const focusableElements = () => Array.from(dialog?.querySelectorAll(MODAL_FOCUSABLE_SELECTOR) || [])
+                    .filter(element => element.getClientRects().length > 0);
+                const initialFocus = dialog?.querySelector('[data-modal-initial-focus]') || focusableElements()[0] || dialog;
+                initialFocus?.focus();
+
+                const handleKeyDown = (event) => {
+                    if (event.key === 'Escape') {
+                        event.preventDefault();
+                        onCloseRef.current();
+                        return;
+                    }
+                    if (event.key !== 'Tab') return;
+
+                    const elements = focusableElements();
+                    if (elements.length === 0) {
+                        event.preventDefault();
+                        dialog?.focus();
+                        return;
+                    }
+
+                    const first = elements[0];
+                    const last = elements[elements.length - 1];
+                    if (event.shiftKey && (document.activeElement === first || !dialog?.contains(document.activeElement))) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                };
+
+                document.addEventListener('keydown', handleKeyDown);
+                return () => {
+                    document.removeEventListener('keydown', handleKeyDown);
+                    const returnTarget = returnFocusRef?.current || previousFocusRef.current;
+                    requestAnimationFrame(() => {
+                        if (returnTarget?.isConnected) returnTarget.focus();
+                    });
+                };
+            }, [open, returnFocusRef]);
+
+            if (!open) return null;
+
+            // Portal to the document body: blurred/transformed toolbars must
+            // never become the containing block for a viewport-sized dialog.
+            return ReactDOM.createPortal(
+                <div
+                    className={`fixed inset-0 flex items-center justify-center ${overlayClassName}`}
+                    style={{ position: 'fixed', inset: 0, padding: '1rem', boxSizing: 'border-box', overflowY: 'auto' }}
+                    onMouseDown={(event) => {
+                        if (event.target === event.currentTarget) onClose();
+                    }}
+                >
+                    <div
+                        ref={dialogRef}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby={labelledBy}
+                        aria-describedby={describedBy}
+                        tabIndex="-1"
+                        className={panelClassName}
+                        style={{ maxHeight: 'calc(100dvh - 2rem)', minHeight: 0, overflowY: 'auto' }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                    >
+                        {children}
+                    </div>
+                </div>,
+                document.body
+            );
         };
 
         // --- UTILITY: auto-resize textarea to content height ---
@@ -205,6 +458,7 @@
             "example": "", "example_02": "", "example_03": "",
             "example_note": "", "example_02_note": "", "example_03_note": "",
             "short_cite": "", "url": "", "script_part": "",
+            "nested_under": "",
             "edit_tags": "", "relevance_tags": [], "needs_verification": false,
             "script_notes": "", "script_tags": "", "audio_tags": "",
             "id_extra_01": "", "id_extra_02": "",
@@ -345,16 +599,22 @@
 
             return (
                 <div className="bg-slate-950/50 p-3 rounded border border-slate-800 flex flex-col gap-2 relative group">
-                    <button onClick={() => onDelete(index)} className="absolute top-2 right-2 text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                        type="button"
+                        aria-label={`Delete ${labels.rule.toLowerCase()} row ${index + 1}`}
+                        onClick={() => onDelete(index)}
+                        className="reveal-action absolute top-2 right-2 text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
                         <Icon name="trash-2" size={14} />
                     </button>
 
                     <div className="flex gap-2 items-start pr-6">
                         {/* Rule Name */}
                         <div className="flex-1">
-                            <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">{labels.rule}</label>
+                            <label htmlFor={`rule-row-${index}-name`} className="text-xs uppercase text-slate-500 font-bold mb-1 block">{labels.rule}</label>
                             {isNewRule ? (
                                 <input
+                                    id={`rule-row-${index}-name`}
                                     className="custom-input text-xs"
                                     placeholder={`New ${labels.rule} Name`}
                                     value={currentRuleName}
@@ -364,6 +624,7 @@
                                 />
                             ) : (
                                 <select
+                                    id={`rule-row-${index}-name`}
                                     className="custom-input text-xs"
                                     value={currentRuleName}
                                     onChange={(e) => {
@@ -380,8 +641,9 @@
 
                         {/* Rule Number */}
                         <div className="w-20">
-                            <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">#</label>
+                            <label htmlFor={`rule-row-${index}-number`} className="text-xs uppercase text-slate-500 font-bold mb-1 block">#</label>
                             <input
+                                id={`rule-row-${index}-number`}
                                 className="custom-input text-xs font-mono text-amber-500"
                                 value={ruleData.number || ""}
                                 placeholder="#"
@@ -394,9 +656,10 @@
                     <div className="flex gap-2 items-start pl-4 border-l-2 border-slate-800">
                         {/* Subpart Name */}
                         <div className="flex-1">
-                            <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">Subpart</label>
+                            <label htmlFor={`rule-row-${index}-subpart`} className="text-xs uppercase text-slate-500 font-bold mb-1 block">Subpart</label>
                             {isNewSubpart ? (
                                 <input
+                                    id={`rule-row-${index}-subpart`}
                                     className="custom-input text-xs"
                                     placeholder="New Subpart Name"
                                     value={currentSubpartName}
@@ -406,6 +669,7 @@
                                 />
                             ) : (
                                 <select
+                                    id={`rule-row-${index}-subpart`}
                                     className="custom-input text-xs"
                                     value={currentSubpartName}
                                     disabled={!currentRuleName}
@@ -423,8 +687,9 @@
 
                         {/* Subpart Number */}
                         <div className="w-20">
-                            <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">Sub #</label>
+                            <label htmlFor={`rule-row-${index}-subpart-number`} className="text-xs uppercase text-slate-500 font-bold mb-1 block">Sub #</label>
                             <input
+                                id={`rule-row-${index}-subpart-number`}
                                 className="custom-input text-xs font-mono text-amber-500/70"
                                 value={ruleData.subpartNumber || ""}
                                 placeholder="#"
@@ -497,8 +762,8 @@
             return (
                 <div className="col-span-12 bg-slate-900 border border-slate-800 p-4 rounded-lg">
                     <div className="flex justify-between items-center mb-3">
-                        <label className="custom-label text-indigo-400 mb-0">Applied {labels.rules}</label>
-                        <button onClick={handleAdd} className="text-[10px] bg-indigo-900/50 hover:bg-indigo-800 text-indigo-300 px-2 py-1 rounded font-bold border border-indigo-700/50 flex items-center gap-1">
+                        <span className="custom-label text-indigo-400 mb-0">Applied {labels.rules}</span>
+                        <button onClick={handleAdd} className="text-xs bg-indigo-900/50 hover:bg-indigo-800 text-indigo-300 px-2 py-1 rounded font-bold border border-indigo-700/50 flex items-center gap-1">
                             <Icon name="plus" size={12} /> {labels.addRule}
                         </button>
                     </div>
@@ -582,19 +847,20 @@
             return (
                 <div className="col-span-12 bg-slate-900 border border-slate-800 p-4 rounded-lg">
                     <div className="flex justify-between items-center mb-3">
-                        <label className="custom-label text-amber-400 mb-0 flex items-center gap-2">
+                        <span className="custom-label text-amber-400 mb-0 flex items-center gap-2">
                             <Icon name="lightbulb" size={14} className="text-amber-400" />
                             {labels.examplesTitle || 'Examples'}
                             {filledCount > 0 && (
-                                <span className="text-[10px] bg-amber-900/30 text-amber-400 px-1.5 py-0.5 rounded font-mono">
+                                <span className="text-xs bg-amber-900/30 text-amber-400 px-1.5 py-0.5 rounded font-mono">
                                     {filledCount} of 3
                                 </span>
                             )}
-                        </label>
+                        </span>
                         <div className="flex items-center gap-4">
-                            <label className="flex items-center gap-2 cursor-pointer">
-                                <span className="text-[10px] uppercase text-slate-500 font-bold">Only Example</span>
+                            <label htmlFor="contains-only-example" className="flex items-center gap-2 cursor-pointer">
+                                <span className="text-xs uppercase text-slate-500 font-bold">Only Example</span>
                                 <input
+                                    id="contains-only-example"
                                     type="checkbox"
                                     className="sr-only peer"
                                     checked={Boolean(item.contains_only_example)}
@@ -605,9 +871,10 @@
                                     className={`toggle-switch peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-400 peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-slate-900 ${item.contains_only_example ? 'active' : ''}`}
                                 />
                             </label>
-                            <label className="flex items-center gap-2 cursor-pointer">
-                                <span className="text-[10px] uppercase text-slate-500 font-bold">Has Example</span>
+                            <label htmlFor="contains-example" className="flex items-center gap-2 cursor-pointer">
+                                <span className="text-xs uppercase text-slate-500 font-bold">Has Example</span>
                                 <input
+                                    id="contains-example"
                                     type="checkbox"
                                     className="sr-only peer"
                                     checked={Boolean(item.contains_example)}
@@ -627,7 +894,7 @@
                             return (
                                 <div key={ex.key} className="example-card">
                                     <div className="flex justify-between items-start gap-2">
-                                        <span className="text-[10px] uppercase text-amber-500/60 font-bold shrink-0 mt-1">
+                                        <span className="text-xs uppercase text-amber-500/60 font-bold shrink-0 mt-1">
                                             {labels.exampleSlot || 'Ex'} {idx + 1}
                                         </span>
                                         <div className="flex-1 min-w-0">
@@ -699,7 +966,7 @@
                         )}
 
                         {filledCount >= 3 && (
-                            <div className="text-[10px] text-amber-500/60 text-center py-1">
+                            <div className="text-xs text-amber-500/60 text-center py-1">
                                 All 3 {labels.exampleSlot?.toLowerCase() || 'example'} slots filled
                             </div>
                         )}
@@ -755,20 +1022,20 @@
                         onClick={() => setIsOpen(!isOpen)}
                         className="w-full flex justify-between items-center p-4 hover:bg-slate-800/30 transition-colors"
                     >
-                        <label className="custom-label text-slate-400 mb-0 flex items-center gap-2 cursor-pointer">
+                        <span className="custom-label text-slate-400 mb-0 flex items-center gap-2 cursor-pointer">
                             <Icon name="info" size={14} className="text-slate-500" />
                             Additional Information
                             {totalVisible > 0 && (
-                                <span className="text-[10px] bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded font-mono">
+                                <span className="text-xs bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded font-mono">
                                     {totalVisible} field{totalVisible !== 1 ? 's' : ''}
                                 </span>
                             )}
                             {extraCount > 0 && (
-                                <span className="text-[10px] bg-amber-900/30 text-amber-400 px-1.5 py-0.5 rounded font-mono">
+                                <span className="text-xs bg-amber-900/30 text-amber-400 px-1.5 py-0.5 rounded font-mono">
                                     {extraCount} extra
                                 </span>
                             )}
-                        </label>
+                        </span>
                         <Icon name={isOpen ? 'chevron-up' : 'chevron-down'} size={16} className="text-slate-500" />
                     </button>
 
@@ -779,20 +1046,23 @@
                                     const safeValue = item[key] === undefined || item[key] === null ? '' : item[key];
                                     const isExtra = extraFieldSet.has(key);
                                     const isLong = TEXTAREA_FIELDS.includes(key) || (typeof safeValue === 'string' && safeValue.length > 100);
+                                    const fieldId = `additional-field-${key}`;
                                     return (
                                         <div key={key} className={`col-span-12 ${isLong ? '' : 'md:col-span-6'}`}>
-                                            <label className="custom-label flex items-center gap-1">
+                                            <label htmlFor={fieldId} className="custom-label flex items-center gap-1">
                                                 {key.replace(/_/g, ' ')}
-                                                {isExtra && <span className="text-[8px] bg-amber-900/40 text-amber-400 px-1 py-0.5 rounded font-bold ml-1">EXTRA</span>}
+                                                {isExtra && <span className="text-xs bg-amber-900/40 text-amber-400 px-1 py-0.5 rounded font-bold ml-1">EXTRA</span>}
                                             </label>
                                             {isLong ? (
                                                 <textarea
+                                                    id={fieldId}
                                                     className="custom-input min-h-[60px] font-serif"
                                                     value={typeof safeValue === 'object' ? JSON.stringify(safeValue) : safeValue}
                                                     onChange={(e) => onChange(key, e.target.value)}
                                                 />
                                             ) : (
                                                 <input
+                                                    id={fieldId}
                                                     className="custom-input"
                                                     value={typeof safeValue === 'object' ? JSON.stringify(safeValue) : safeValue}
                                                     onChange={(e) => onChange(key, e.target.value)}
@@ -821,7 +1091,7 @@
                                     ) : (
                                         <button
                                             onClick={() => setAddingField(true)}
-                                            className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-400 px-2 py-1 rounded font-bold border border-slate-700 flex items-center gap-1"
+                                            className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-400 px-2 py-1 rounded font-bold border border-slate-700 flex items-center gap-1"
                                         >
                                             <Icon name="plus" size={12} /> Add Field
                                         </button>
@@ -878,6 +1148,7 @@
             const [showCreateMenu, setShowCreateMenu] = useState(false);
             const [showSaveMenu, setShowSaveMenu] = useState(false);
             const [newDocModal, setNewDocModal] = useState(false);
+            const createButtonRef = useRef(null);
             const [sidebarWidth, setSidebarWidth] = useState(300);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
             const sidebarWidthBeforeCollapse = useRef(300);
@@ -888,6 +1159,7 @@
             const isStageResizing = useRef(false);
             const stageDragIdx = useRef(null);
             const [stageDragOverIdx, setStageDragOverIdx] = useState(null);
+            const [supportTarget, setSupportTarget] = useState(null); // { surface: 'draft' | 'stage', parentId }
 
             // E013: Bulk selection
             const [bulkSelectedIds, setBulkSelectedIds] = useState(new Set());
@@ -995,6 +1267,20 @@
             const [parseLoading, setParseLoading] = useState(false);
             const [parseSaving, setParseSaving] = useState(false);
             const [parseError, setParseError] = useState(null);
+
+            // Project extraction is a separate copy operation, never Save As.
+            const [projectModal, setProjectModal] = useState(false);
+            const draftProjectButtonRef = useRef(null);
+            const [projectScope, setProjectScope] = useState('draft');
+            const [projectEmptyDraft, setProjectEmptyDraft] = useState(true);
+            const [projectPreview, setProjectPreview] = useState(null);
+            const [projectSaved, setProjectSaved] = useState(null);
+            const [projectBusy, setProjectBusy] = useState(false);
+            const [projectError, setProjectError] = useState('');
+            const [projectAcknowledged, setProjectAcknowledged] = useState(false);
+            const [projectManualPaths, setProjectManualPaths] = useState(false);
+            const [projectItemsPath, setProjectItemsPath] = useState('');
+            const [projectSourcesPath, setProjectSourcesPath] = useState('');
 
             // Source search combobox state
             const [srcQuery, setSrcQuery] = useState('');
@@ -1442,6 +1728,7 @@
             // E016: Ctrl+Z / Ctrl+Shift+Z undo/redo
             useEffect(() => {
                 const handler = (e) => {
+                    if (projectModal) return;
                     // E016: Ctrl+Z undo
                     if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
                         const tag = document.activeElement?.tagName?.toLowerCase();
@@ -1495,7 +1782,7 @@
                 };
                 window.addEventListener('keydown', handler);
                 return () => window.removeEventListener('keydown', handler);
-            }, [view, selectedItemId, filteredItems, showErrorToast, itemsReady]);
+            }, [view, selectedItemId, filteredItems, showErrorToast, itemsReady, projectModal]);
 
             // --- COMPUTED DATA ---
 
@@ -1617,6 +1904,103 @@
 
                 return { filteredItems: filtered, searchMatchMap: matchMap };
             }, [items, selectedRule, selectedSubpart, searchQuery, searchFields, activeFilters]);
+
+            const projectScopeDescription = projectScope === 'draft'
+                ? 'All top-level Draft items across the entire project, plus every supporting descendant. Search, category, quick filters, and Draft part filters do not narrow this scope.'
+                : projectScope === 'checked'
+                    ? `${bulkSelectedIds.size} checked items across the library, including checks outside the current filters, plus every supporting descendant.`
+                    : `${filteredItems.length} current Library results, plus every supporting descendant. Category: ${selectedRule}; subpart: ${selectedSubpart ?? 'general'}; search: ${searchQuery || '(none)'}; search fields: ${[...searchFields].join(', ')}; quick filters: ${[...activeFilters].join(', ') || '(none)'}. Draft part filters do not apply.`;
+
+            const invalidateProjectPreview = () => {
+                setProjectPreview(null);
+                setProjectAcknowledged(false);
+                setProjectError('');
+            };
+
+            const beginProjectExtraction = () => {
+                setShowCreateMenu(false);
+                setProjectScope('draft');
+                setProjectEmptyDraft(true);
+                invalidateProjectPreview();
+                setProjectSaved(null);
+                setProjectManualPaths(false);
+                setProjectItemsPath('');
+                setProjectSourcesPath('');
+                setProjectModal(true);
+            };
+
+            const previewProject = async () => {
+                setProjectBusy(true);
+                invalidateProjectPreview();
+                try {
+                    await flushAllPendingDocumentSaves();
+                    const response = await api('preview_project', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            scope: projectScope,
+                            selected_ids: projectScope === 'checked' ? [...bulkSelectedIds]
+                                : projectScope === 'filtered' ? filteredItems.map(item => item.id_item) : [],
+                            empty_draft: projectEmptyDraft,
+                            items_document: itemsDocumentRef.current,
+                            sources_document: sourcesDocumentRef.current,
+                        }),
+                    });
+                    setProjectPreview(await readApiResponse(response));
+                } catch (error) {
+                    setProjectError(error.message);
+                } finally { setProjectBusy(false); }
+            };
+
+            const saveProject = async () => {
+                setProjectBusy(true);
+                setProjectError('');
+                try {
+                    await flushAllPendingDocumentSaves();
+                    const response = await api('save_project', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            preview_token: projectPreview.preview_token,
+                            ...(projectManualPaths ? { items_path: projectItemsPath, sources_path: projectSourcesPath } : {}),
+                        }),
+                    });
+                    const saved = await readApiResponse(response);
+                    if (saved.status === 'canceled') {
+                        setProjectError('Save canceled. No project files were created; the original project remains open.');
+                    } else if (saved.status === 'gui_unavailable') {
+                        setProjectManualPaths(true);
+                        setProjectError(saved.message);
+                    } else if (saved.status === 'success') {
+                        setProjectSaved(saved);
+                    }
+                } catch (error) {
+                    setProjectError(error.message);
+                } finally { setProjectBusy(false); }
+            };
+
+            const openSavedProject = async () => {
+                setProjectBusy(true);
+                setProjectError('');
+                try {
+                    await flushAllPendingDocumentSaves();
+                    const response = await api('open_project', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            project_token: projectSaved.project_token,
+                            items_document: itemsDocumentRef.current,
+                            sources_document: sourcesDocumentRef.current,
+                        }),
+                    });
+                    const opened = await readApiResponse(response);
+                    activateItemsDocument({ rawItems: opened.items, filename: opened.items_filename, document: opened.items_document });
+                    activateSourcesDocument({ sources: opened.sources, filename: opened.sources_filename, document: opened.sources_document });
+                    setSupportTarget(null);
+                    setLoadError(null);
+                    setStatus('Opened new project');
+                    setProjectModal(false);
+                } catch (error) {
+                    setProjectError(error.message);
+                } finally { setProjectBusy(false); }
+            };
 
             // Helper to get Source info for an Item
             const getSourceForItem = (item) => {
@@ -1806,15 +2190,17 @@
 
             const renderField = (obj, key, onChange, isSource = false) => {
                 const safeValue = obj[key] === undefined || obj[key] === null ? '' : obj[key];
+                const fieldId = `${isSource ? 'source' : 'item'}-field-${key}`;
 
                 // Handle Arrays (like rule_number)
                 if (Array.isArray(safeValue)) {
                     return (
                         <div key={key} className="col-span-12 md:col-span-6">
-                            <label className="custom-label flex justify-between">
-                                {key.replace(/_/g, ' ')} <span className="text-[10px] opacity-50">LIST (comma sep)</span>
+                            <label htmlFor={fieldId} className="custom-label flex justify-between">
+                                {key.replace(/_/g, ' ')} <span className="text-xs opacity-50">LIST (comma sep)</span>
                             </label>
                             <input
+                                id={fieldId}
                                 className="custom-input"
                                 value={safeValue.join(', ')}
                                 onChange={(e) => onChange(key, e.target.value.split(',').map(s => s.trim()))}
@@ -1827,15 +2213,17 @@
 
                 return (
                     <div key={key} className={`col-span-12 ${isLong ? '' : 'md:col-span-6'}`}>
-                        <label className="custom-label">{key.replace(/_/g, ' ')}</label>
+                        <label htmlFor={fieldId} className="custom-label">{key.replace(/_/g, ' ')}</label>
                         {isLong ? (
                             <textarea
+                                id={fieldId}
                                 className="custom-input min-h-[80px] font-serif"
                                 value={safeValue}
                                 onChange={(e) => onChange(key, e.target.value)}
                             />
                         ) : (
                             <input
+                                id={fieldId}
                                 className="custom-input"
                                 value={safeValue}
                                 onChange={(e) => onChange(key, e.target.value)}
@@ -1917,11 +2305,87 @@
                 setWidth(updateWidth);
             }, []);
 
+            const getSupportChildren = (parentId) => items.filter(item => item.nested_under === parentId);
+
+            const wouldCreateSupportCycle = (childId, parentId) => {
+                let currentId = parentId;
+                const visited = new Set();
+                while (currentId && !visited.has(currentId)) {
+                    if (currentId === childId) return true;
+                    visited.add(currentId);
+                    currentId = items.find(item => item.id_item === currentId)?.nested_under || '';
+                }
+                return false;
+            };
+
+            const nestItemUnder = (childId, parentId, surface) => {
+                if (!childId || !parentId || childId === parentId) return;
+                if (wouldCreateSupportCycle(childId, parentId)) {
+                    showErrorToast('That support relationship would create a loop.');
+                    return;
+                }
+
+                const parent = items.find(item => item.id_item === parentId);
+                const child = items.find(item => item.id_item === childId);
+                if (!parent || !child) return;
+
+                let updatedChild = { ...child, nested_under: parentId };
+                if (surface === 'draft') {
+                    // Preserve the recovered Draft behavior: supporting items leave the
+                    // top-level script order and return to the sidebar when un-nested.
+                    updatedChild.id_script = 0;
+                } else if (surface === 'stage' && stageRule) {
+                    // A supporting Stage item belongs to the same staged rule/subpart as
+                    // its parent so the relationship remains visible in that Stage.
+                    const parentRuleIdx = Array.isArray(parent.rule_name) ? parent.rule_name.indexOf(stageRule) : -1;
+                    const targetSubpart = parentRuleIdx >= 0 && Array.isArray(parent.subpart_name)
+                        ? (parent.subpart_name[parentRuleIdx] || '')
+                        : (stageSubpart === '__all_rule__' ? '' : (stageSubpart || ''));
+                    const ruleNames = Array.isArray(child.rule_name) ? [...child.rule_name] : [];
+                    const subpartNames = Array.isArray(child.subpart_name) ? [...child.subpart_name] : [];
+                    const idSubparts = Array.isArray(child.id_subpart) ? [...child.id_subpart] : [];
+                    let childRuleIdx = ruleNames.indexOf(stageRule);
+                    if (childRuleIdx === -1) {
+                        ruleNames.push(stageRule);
+                        subpartNames.push(targetSubpart);
+                        idSubparts.push(0);
+                        childRuleIdx = ruleNames.length - 1;
+                    } else {
+                        while (subpartNames.length <= childRuleIdx) subpartNames.push('');
+                        while (idSubparts.length <= childRuleIdx) idSubparts.push(0);
+                        subpartNames[childRuleIdx] = targetSubpart;
+                    }
+                    const maxOrder = items.reduce((max, item) => {
+                        if (!Array.isArray(item.rule_name)) return max;
+                        const idx = item.rule_name.indexOf(stageRule);
+                        if (idx === -1) return max;
+                        const itemSubpart = Array.isArray(item.subpart_name) ? (item.subpart_name[idx] || '') : '';
+                        if (itemSubpart !== targetSubpart) return max;
+                        return Math.max(max, Array.isArray(item.id_subpart) ? (item.id_subpart[idx] || 0) : 0);
+                    }, 0);
+                    idSubparts[childRuleIdx] = maxOrder + 1;
+                    updatedChild = {
+                        ...updatedChild,
+                        rule_name: ruleNames,
+                        subpart_name: subpartNames,
+                        id_subpart: idSubparts,
+                    };
+                }
+
+                saveItems(items.map(item => item.id_item === childId ? updatedChild : item));
+                setSupportTarget(null);
+            };
+
+            const unnestItem = (itemId) => {
+                saveItems(items.map(item => item.id_item === itemId ? { ...item, nested_under: '' } : item));
+            };
+
             // --- STAGE ITEMS (for pinned stageRule/stageSubpart, sorted by id_subpart) ---
             const stageItems = useMemo(() => {
                 if (!stageRule) return [];
                 return items
                     .filter(item => {
+                        if (item.nested_under) return false;
                         if (!Array.isArray(item.rule_name)) return false;
                         if (!item.rule_name.includes(stageRule)) return false;
                         // Subpart filtering within the rule
@@ -2023,6 +2487,8 @@
                     {/* E009: Error Toast */}
                     {errorToast && (
                         <div
+                            role="alert"
+                            aria-live="assertive"
                             onClick={() => setErrorToast(null)}
                             className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] cursor-pointer animate-bounce"
                             style={{ animation: 'none' }}
@@ -2035,24 +2501,31 @@
                         </div>
                     )}
 
-                    {deleteConfirm && (
-                        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4" onMouseDown={() => setDeleteConfirm(null)}>
-                            <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-xl shadow-2xl shadow-black/50 overflow-hidden" onMouseDown={(e) => e.stopPropagation()}>
+                    <AccessibleModal
+                        open={Boolean(deleteConfirm)}
+                        onClose={() => setDeleteConfirm(null)}
+                        labelledBy="delete-dialog-title"
+                        describedBy="delete-dialog-description"
+                        panelClassName="w-full max-w-md bg-slate-900 border border-slate-700 rounded-xl shadow-2xl shadow-black/50 overflow-hidden"
+                    >
+                        {deleteConfirm && (
+                            <>
                                 <div className="p-5 border-b border-slate-800 flex items-start gap-3">
                                     <div className="w-10 h-10 rounded-lg bg-red-950/70 border border-red-800 flex items-center justify-center shrink-0">
                                         <Icon name="trash-2" size={18} className="text-red-400" />
                                     </div>
                                     <div>
-                                        <h3 className="text-lg font-bold text-slate-100">{deleteConfirm.title}</h3>
-                                        <p className="text-sm text-slate-400 mt-1">{deleteConfirm.message}</p>
+                                        <h3 id="delete-dialog-title" className="text-lg font-bold text-slate-100">{deleteConfirm.title}</h3>
+                                        <p id="delete-dialog-description" className="text-sm text-slate-400 mt-1">{deleteConfirm.message}</p>
                                         {deleteConfirm.detail && (
                                             <p className="text-xs text-slate-500 mt-2">{deleteConfirm.detail}</p>
                                         )}
                                     </div>
                                 </div>
                                 <div className="p-5">
-                                    <label className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer mb-5">
+                                    <label htmlFor="suppress-delete-confirm" className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer mb-5">
                                         <input
+                                            id="suppress-delete-confirm"
                                             type="checkbox"
                                             className="w-3.5 h-3.5 accent-indigo-500"
                                             checked={suppressDeleteConfirm}
@@ -2062,6 +2535,7 @@
                                     </label>
                                     <div className="flex items-center justify-end gap-3">
                                         <button
+                                            data-modal-initial-focus
                                             onClick={() => setDeleteConfirm(null)}
                                             className="px-4 py-2 rounded-lg text-sm font-bold text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
                                         >
@@ -2079,13 +2553,13 @@
                                         </button>
                                     </div>
                                 </div>
-                            </div>
-                        </div>
-                    )}
+                            </>
+                        )}
+                    </AccessibleModal>
 
                     {/* E016: Delete Undo Toast */}
                     {deleteToast && (
-                        <div className="fixed top-4 right-6 z-[100]" style={{ animation: 'slideIn 0.3s ease-out' }}>
+                        <div role="status" aria-live="polite" aria-atomic="true" className="fixed top-4 right-6 z-[100]" style={{ animation: 'slideIn 0.3s ease-out' }}>
                             <div className="bg-slate-800 border border-slate-600 text-slate-200 px-5 py-3 rounded-xl shadow-2xl shadow-black/40 flex items-center gap-4 text-sm">
                                 <div className="flex items-center gap-2">
                                     <Icon name="trash-2" size={16} className="text-red-400" />
@@ -2109,6 +2583,8 @@
                                     <Icon name="rotate-ccw" size={12} /> Undo
                                 </button>
                                 <button
+                                    type="button"
+                                    aria-label="Dismiss delete notification"
                                     onClick={() => setDeleteToast(null)}
                                     className="text-slate-500 hover:text-white p-1 transition-colors"
                                 >
@@ -2117,8 +2593,9 @@
                             </div>
                             {!suppressDeleteConfirm && (
                                 <div className="mt-1 flex items-center justify-end gap-2 pr-1">
-                                    <label className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 cursor-pointer">
+                                    <label htmlFor="suppress-delete-toast-confirm" className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 cursor-pointer">
                                         <input
+                                            id="suppress-delete-toast-confirm"
                                             type="checkbox"
                                             className="w-3 h-3 accent-indigo-500"
                                             onChange={(e) => { if (e.target.checked) setSuppressDeleteConfirm(true); }}
@@ -2143,7 +2620,7 @@
                                 {!sidebarCollapsed && (
                                     <button
                                         onClick={() => setSidebarEditMode(!sidebarEditMode)}
-                                        className={`px-2 py-1 rounded text-[10px] font-bold transition-colors ${sidebarEditMode ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                                        className={`px-2 py-1 rounded text-xs font-bold transition-colors ${sidebarEditMode ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
                                     >
                                         <Icon name="pencil" size={10} /> {sidebarEditMode ? 'DONE' : 'EDIT'}
                                     </button>
@@ -2250,13 +2727,13 @@
                                                     {sidebarEditMode ? (
                                                         <div className="flex gap-1 flex-1" onClick={e => e.stopPropagation()}>
                                                             <input
-                                                                className="w-10 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-[10px] text-amber-400 font-mono"
+                                                                className="w-10 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs text-amber-400 font-mono"
                                                                 value={rule.number}
                                                                 placeholder="#"
                                                                 onChange={e => updateRuleForAll(rule.name, null, e.target.value)}
                                                             />
                                                             <input
-                                                                className="flex-1 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-[10px] text-white font-mono min-w-0"
+                                                                className="flex-1 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs text-white font-mono min-w-0"
                                                                 value={rule.name}
                                                                 onChange={e => updateRuleForAll(rule.name, e.target.value, null)}
                                                             />
@@ -2272,7 +2749,7 @@
                                                     <>
                                                         <button
                                                             onClick={handleStageAllClick}
-                                                            className={`text-[8px] px-1 py-0.5 rounded shrink-0 transition-colors cursor-pointer font-bold uppercase ${stageRule === rule.name && stageSubpart === '__all_rule__'
+                                                            className={`text-xs px-1 py-0.5 rounded shrink-0 transition-colors cursor-pointer font-bold uppercase ${stageRule === rule.name && stageSubpart === '__all_rule__'
                                                                 ? 'bg-purple-600 text-white'
                                                                 : 'bg-slate-800/50 text-slate-600 hover:bg-purple-900/40 hover:text-purple-300'
                                                                 }`}
@@ -2282,7 +2759,7 @@
                                                         </button>
                                                         <button
                                                             onClick={handleGeneralClick}
-                                                            className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 transition-colors cursor-pointer ${isGeneralActive
+                                                            className={`text-xs px-1.5 py-0.5 rounded shrink-0 transition-colors cursor-pointer ${isGeneralActive
                                                                 ? 'bg-indigo-600 text-white font-bold'
                                                                 : 'bg-slate-800 text-slate-500 hover:bg-slate-700 hover:text-slate-300'
                                                                 }`}
@@ -2292,7 +2769,7 @@
                                                         </button>
                                                         <button
                                                             onClick={handleTotalClick}
-                                                            className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 transition-colors cursor-pointer ${isAllActive
+                                                            className={`text-xs px-1.5 py-0.5 rounded shrink-0 transition-colors cursor-pointer ${isAllActive
                                                                 ? 'bg-indigo-600 text-white font-bold'
                                                                 : 'bg-slate-800 text-slate-500 hover:bg-slate-700 hover:text-slate-300'
                                                                 }`}
@@ -2304,7 +2781,7 @@
                                                 ) : (
                                                     <button
                                                         onClick={(e) => { e.stopPropagation(); setSelectedRule(rule.name); setSelectedSubpart(null); setView('library'); }}
-                                                        className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 transition-colors cursor-pointer ${isGeneralActive
+                                                        className={`text-xs px-1.5 py-0.5 rounded shrink-0 transition-colors cursor-pointer ${isGeneralActive
                                                             ? 'bg-indigo-600 text-white font-bold'
                                                             : 'bg-slate-800 text-slate-500 hover:bg-slate-700 hover:text-slate-300'
                                                             }`}
@@ -2339,7 +2816,7 @@
                                                         </button>
                                                         <button
                                                             onClick={(e) => { e.stopPropagation(); setSelectedRule(rule.name); setSelectedSubpart(sub.name); setView('library'); }}
-                                                            className={`text-[8px] px-1 rounded shrink-0 transition-colors cursor-pointer ${isSubSelected ? 'bg-indigo-600 text-white font-bold' : 'bg-slate-800/50 text-slate-500 hover:bg-slate-700 hover:text-slate-300'}`}
+                                                            className={`text-xs px-1 rounded shrink-0 transition-colors cursor-pointer ${isSubSelected ? 'bg-indigo-600 text-white font-bold' : 'bg-slate-800/50 text-slate-500 hover:bg-slate-700 hover:text-slate-300'}`}
                                                             title={`${sub.itemCount} items (Library)`}
                                                         >
                                                             {sub.itemCount}
@@ -2412,7 +2889,7 @@
                                     />
                                     <button
                                         onClick={() => setShowSearchFields(!showSearchFields)}
-                                        className={`absolute right-2 top-1.5 text-[10px] font-bold rounded px-1 transition-colors ${showSearchFields ? 'text-indigo-400' : 'text-slate-600 hover:text-slate-400'}`}
+                                        className={`absolute right-2 top-1.5 text-xs font-bold rounded px-1 transition-colors ${showSearchFields ? 'text-indigo-400' : 'text-slate-600 hover:text-slate-400'}`}
                                         title="Toggle search field selection"
                                     >
                                         <Icon name="sliders" size={12} />
@@ -2420,21 +2897,22 @@
                                     {showSearchFields && (
                                         <div className="absolute top-8 left-0 z-50 bg-slate-900 border border-slate-700 rounded-lg p-3 shadow-xl min-w-[280px]">
                                             <div className="flex justify-between items-center mb-2">
-                                                <span className="text-[10px] uppercase font-bold text-slate-500">Search Fields</span>
+                                                <span className="text-xs uppercase font-bold text-slate-500">Search Fields</span>
                                                 <button
                                                     onClick={() => {
                                                         const allOn = searchFields.size === SEARCH_FIELDS.length;
                                                         setSearchFields(allOn ? new Set() : new Set(SEARCH_FIELDS.map(f => f.key)));
                                                     }}
-                                                    className="text-[10px] text-indigo-400 hover:text-indigo-300"
+                                                    className="text-xs text-indigo-400 hover:text-indigo-300"
                                                 >
                                                     {searchFields.size === SEARCH_FIELDS.length ? 'Deselect All' : 'Select All'}
                                                 </button>
                                             </div>
                                             <div className="grid grid-cols-2 gap-1">
                                                 {SEARCH_FIELDS.map(f => (
-                                                    <label key={f.key} className="flex items-center gap-1.5 text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer py-0.5">
+                                                    <label key={f.key} htmlFor={`search-field-${f.key}`} className="flex items-center gap-1.5 text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer py-0.5">
                                                         <input
+                                                            id={`search-field-${f.key}`}
                                                             type="checkbox"
                                                             checked={searchFields.has(f.key)}
                                                             onChange={() => {
@@ -2455,19 +2933,19 @@
                             <div className="flex items-center gap-4">
                                 {/* File Picker Buttons */}
                                 <div className="flex items-center gap-2 border-r border-slate-700 pr-4">
-                                    <button onClick={openItemsPicker} className="flex items-center gap-1 text-[10px] font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors" title="Open Items JSON">
+                                    <button onClick={openItemsPicker} className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors" title="Open Items JSON">
                                         <Icon name="folder-open" size={12} /> Items: <span className="text-indigo-400 max-w-[80px] truncate">{itemsFilename}</span>
                                     </button>
-                                    <button onClick={openSourcesPicker} className="flex items-center gap-1 text-[10px] font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors" title="Open Sources JSON">
+                                    <button onClick={openSourcesPicker} className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors" title="Open Sources JSON">
                                         <Icon name="folder-open" size={12} /> Sources: <span className="text-emerald-400 max-w-[80px] truncate">{sourcesFilename}</span>
                                     </button>
                                 </div>
-                                <span className={`text-[10px] font-mono px-2 py-1 rounded uppercase ${status.includes('Error') ? 'text-red-400 bg-red-900/20' : 'text-green-400 bg-green-900/20'}`}>{status}</span>
+                                <span role="status" aria-live="polite" aria-atomic="true" className={`text-xs font-mono px-2 py-1 rounded uppercase ${status.includes('Error') ? 'text-red-400 bg-red-900/20' : 'text-green-400 bg-green-900/20'}`}>{status}</span>
                                 {/* Save As button */}
                                 <div className="relative">
                                     <button
                                         onClick={() => setShowSaveMenu(!showSaveMenu)}
-                                        className="flex items-center gap-1 text-[10px] font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors"
+                                        className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors"
                                         title="Save As..."
                                     >
                                         <Icon name="hard-drive-download" size={13} /> Save As
@@ -2496,6 +2974,7 @@
                                 {/* Create new + button */}
                                 <div className="relative">
                                     <button
+                                        ref={createButtonRef}
                                         onClick={() => setShowCreateMenu(!showCreateMenu)}
                                         className="bg-indigo-600 hover:bg-indigo-500 text-white w-8 h-8 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-900/30 transition-all hover:scale-105 active:scale-95"
                                         title="Create new..."
@@ -2531,6 +3010,12 @@
                                                 </button>
                                                 <div className="border-t border-slate-700" />
                                                 <button
+                                                    onClick={beginProjectExtraction}
+                                                    disabled={!itemsReady || !sourcesReady}
+                                                    className="w-full px-4 py-2.5 text-sm text-left text-slate-100 hover:bg-indigo-600 disabled:opacity-50"
+                                                >Create project from selection</button>
+                                                <div className="border-t border-slate-700" />
+                                                <button
                                                     onClick={() => { setNewDocModal(true); setShowCreateMenu(false); }}
                                                     className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-200 hover:bg-violet-600 hover:text-white transition-colors"
                                                 >
@@ -2541,14 +3026,84 @@
                                     )}
                                 </div>
 
+                                <AccessibleModal
+                                    open={projectModal}
+                                    onClose={() => { if (!projectBusy) setProjectModal(false); }}
+                                    labelledBy="project-extraction-title"
+                                    describedBy="project-extraction-description"
+                                    returnFocusRef={view === 'draft' ? draftProjectButtonRef : createButtonRef}
+                                    panelClassName="bg-slate-900 border border-slate-600 rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl"
+                                >
+                                    <h2 id="project-extraction-title" className="text-lg font-bold text-white">{projectScope === 'draft' ? 'Create project from Draft' : 'Create project from selection'}</h2>
+                                    <p id="project-extraction-description" className="text-sm text-slate-300 mt-2 mb-4">Create a separate research project from these cards and their linked sources. Your original project is kept unchanged.</p>
+                                    {!projectSaved ? <>
+                                        <fieldset disabled={projectBusy} className="space-y-3">
+                                            <label className="block text-sm text-slate-200">Use these cards
+                                                <select className="custom-input mt-1" value={projectScope} onChange={event => { setProjectScope(event.target.value); invalidateProjectPreview(); }}>
+                                                    <option value="draft">Everything currently in Draft (all topics)</option>
+                                                    <option value="checked">Items checked in Library</option>
+                                                    <option value="filtered">Current filtered Library results</option>
+                                                </select>
+                                            </label>
+                                            {projectScope === 'draft' && <p className="text-sm font-semibold text-green-300">Your Draft is already the selection. No checkboxes needed.</p>}
+                                            <p className="text-sm text-slate-300 break-words">{projectScopeDescription}</p>
+                                            <p className="text-xs text-slate-400">Nested supporting cards come with their parent cards, including support nested several levels deep.</p>
+                                            <label className="block text-sm text-slate-200">Draft in the new project
+                                                <select className="custom-input mt-1" value={projectEmptyDraft ? 'empty' : 'preserve'} onChange={event => { setProjectEmptyDraft(event.target.value === 'empty'); invalidateProjectPreview(); }}>
+                                                    <option value="empty">Start with an empty Draft</option>
+                                                    <option value="preserve">Preserve existing Draft order</option>
+                                                </select>
+                                            </label>
+                                            <p className="text-xs text-slate-400">{projectEmptyDraft ? 'The copied cards will be in the new project’s Library. Its Draft will be empty, ready for you to build a fresh story order. Your original Draft stays as it is.' : 'The new project keeps the Draft membership and order these cards already have. Cards outside Draft stay outside Draft.'} Notes, categories, tags and supporting relationships are preserved.</p>
+                                            <button type="button" className="card-action" onClick={previewProject}>Preview project</button>
+                                        </fieldset>
+                                        {projectPreview && <section className="mt-4 p-4 bg-slate-950 border border-slate-600 rounded-lg" aria-label="Project preview">
+                                            <dl className="grid grid-cols-2 gap-2 text-sm text-slate-100">
+                                                <dt>Selected items</dt><dd>{projectPreview.counts.selected}</dd>
+                                                <dt>Additional supporting items</dt><dd>{projectPreview.counts.supporting}</dd>
+                                                <dt>Total items</dt><dd>{projectPreview.counts.total}</dd>
+                                                <dt>Sources</dt><dd>{projectPreview.counts.sources}</dd>
+                                            </dl>
+                                            <p className="mt-3 text-xs text-slate-400">Only support relationships expand the selection. Multi-citation group IDs stay intact. External item links are detached and their original values retained in metadata. Missing sources and support cycles must be resolved before saving.</p>
+                                            {projectPreview.errors.length > 0 && <ul className="mt-3 text-sm text-red-300 list-disc pl-5">{projectPreview.errors.map((error, index) => <li key={index}>{error}</li>)}</ul>}
+                                            {projectPreview.warnings.length > 0 && <>
+                                                <details className="mt-3 text-sm text-amber-200" open>
+                                                    <summary>{projectPreview.warnings.length} relationship/source notices</summary>
+                                                    <ul className="mt-2 max-h-48 overflow-auto list-disc pl-5 break-words">{projectPreview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+                                                </details>
+                                                <label className="flex gap-2 mt-3 text-sm text-slate-200"><input type="checkbox" checked={projectAcknowledged} disabled={projectBusy} onChange={event => setProjectAcknowledged(event.target.checked)} />I understand these changes apply only to the new project.</label>
+                                            </>}
+                                            <label className="flex gap-2 mt-4 text-sm text-slate-200"><input type="checkbox" checked={projectManualPaths} disabled={projectBusy} onChange={event => setProjectManualPaths(event.target.checked)} />Enter file paths instead of using save dialogs</label>
+                                            {projectManualPaths && <div className="mt-3 space-y-2">
+                                                <label className="block text-sm text-slate-200">New items file<input className="custom-input" disabled={projectBusy} value={projectItemsPath} onChange={event => setProjectItemsPath(event.target.value)} placeholder="/absolute/path/episode_items.json" /></label>
+                                                <label className="block text-sm text-slate-200">New sources file<input className="custom-input" disabled={projectBusy} value={projectSourcesPath} onChange={event => setProjectSourcesPath(event.target.value)} placeholder="/absolute/path/episode_sources.json" /></label>
+                                            </div>}
+                                            <p className="text-xs text-slate-400 mt-3">Choose two new filenames in existing folders. Existing files are never overwritten.</p>
+                                            <button type="button" className="card-action mt-3" onClick={saveProject} disabled={projectBusy || projectPreview.errors.length > 0 || (projectPreview.warnings.length > 0 && !projectAcknowledged) || (projectManualPaths && (!projectItemsPath.trim() || !projectSourcesPath.trim()))}>Save new project…</button>
+                                        </section>}
+                                    </> : <section className="text-sm text-slate-200 space-y-3">
+                                        <p className="text-green-300 font-bold">Both project files saved. The original project is still open.</p>
+                                        <p className="break-all">Items: {projectSaved.items_path}</p>
+                                        <p className="break-all">Sources: {projectSaved.sources_path}</p>
+                                        <button type="button" className="card-action" disabled={projectBusy} onClick={openSavedProject}>Open new project</button>
+                                    </section>}
+                                    {projectBusy && <p role="status" className="mt-3 text-sm text-slate-300">Working… If a save dialog is open, choose a filename or cancel it.</p>}
+                                    {projectError && <p role="alert" className="mt-3 text-sm text-red-300">{projectError}</p>}
+                                    <button type="button" className="card-action mt-4" disabled={projectBusy} onClick={() => setProjectModal(false)}>{projectSaved ? 'Done — keep original open' : 'Cancel'}</button>
+                                </AccessibleModal>
+
                                 {/* New Document — mode picker modal */}
-                                {newDocModal && (
-                                    <>
-                                        <div className="fixed inset-0 z-50 bg-black/60" onClick={() => setNewDocModal(false)} />
-                                        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
-                                            <div className="bg-slate-900 border border-slate-600 rounded-xl shadow-2xl shadow-black/60 p-6 w-80 pointer-events-auto">
-                                                <h3 className="text-white font-bold text-base mb-1">New Document</h3>
-                                                <p className="text-slate-400 text-xs mb-5">Choose a schema, then pick where to save the two new JSON files.</p>
+                                <AccessibleModal
+                                    open={newDocModal}
+                                    onClose={() => setNewDocModal(false)}
+                                    labelledBy="new-document-dialog-title"
+                                    describedBy="new-document-dialog-description"
+                                    returnFocusRef={createButtonRef}
+                                    overlayClassName="z-50 bg-black/60 px-4"
+                                    panelClassName="bg-slate-900 border border-slate-600 rounded-xl shadow-2xl shadow-black/60 p-6 w-80"
+                                >
+                                                <h3 id="new-document-dialog-title" className="text-white font-bold text-base mb-1">New Document</h3>
+                                                <p id="new-document-dialog-description" className="text-slate-400 text-xs mb-5">Choose a schema, then pick where to save the two new JSON files.</p>
                                                 <div className="flex flex-col gap-3">
                                                     {[
                                                         { mode: 'improv',   label: 'Book Mode',  sub: 'Rules & subparts',           icon: 'book' },
@@ -2556,6 +3111,7 @@
                                                     ].map(({ mode, label, sub, icon }) => (
                                                         <button
                                                             key={mode}
+                                                            data-modal-initial-focus={mode === 'improv' ? 'true' : undefined}
                                                             onClick={async () => {
                                                                 setNewDocModal(false);
                                                                 try {
@@ -2598,10 +3154,7 @@
                                                     ))}
                                                 </div>
                                                 <button onClick={() => setNewDocModal(false)} className="mt-4 w-full text-xs text-slate-600 hover:text-slate-400 transition-colors">Cancel</button>
-                                            </div>
-                                        </div>
-                                    </>
-                                )}
+                                </AccessibleModal>
                             </div>
                         </div>
 
@@ -2611,7 +3164,7 @@
                                 <div className="min-w-0">
                                     <div className="text-xs font-bold uppercase tracking-wide text-red-300">Document not loaded</div>
                                     <div className="text-xs text-red-200/90 mt-0.5 break-all">{loadError}</div>
-                                    <div className="text-[10px] text-red-400/80 mt-1">The file was not changed. Open a valid document or create a new one.</div>
+                                    <div className="text-xs text-red-400/80 mt-1">The file was not changed. Open a valid document or create a new one.</div>
                                 </div>
                             </div>
                         )}
@@ -2632,14 +3185,16 @@
                                                 <span className="text-xs font-bold uppercase text-purple-300 tracking-wide shrink-0">Stage</span>
                                                 {stageRule && (
                                                     <>
-                                                        <span className="text-[10px] text-purple-400/60 font-mono truncate">{stageRule}{stageSubpart && stageSubpart !== '__all_rule__' ? ` › ${stageSubpart}` : stageSubpart === '__all_rule__' ? ' (all)' : ''}</span>
-                                                        <span className="text-[10px] bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded font-mono shrink-0">
+                                                        <span className="text-xs text-purple-400/60 font-mono truncate">{stageRule}{stageSubpart && stageSubpart !== '__all_rule__' ? ` › ${stageSubpart}` : stageSubpart === '__all_rule__' ? ' (all)' : ''}</span>
+                                                        <span className="text-xs bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded font-mono shrink-0">
                                                             {stageItems.length}
                                                         </span>
                                                     </>
                                                 )}
                                             </div>
                                             <button
+                                                type="button"
+                                                aria-label="Close Stage"
                                                 onClick={() => setStageOpen(false)}
                                                 className="text-slate-500 hover:text-white p-1 rounded hover:bg-slate-700 transition-colors"
                                             >
@@ -2662,18 +3217,19 @@
                                                 <div className="flex flex-col items-center justify-center h-full text-center px-4">
                                                     <Icon name="chevrons-left" size={24} className="text-slate-600 mb-3" />
                                                     <p className="text-xs text-slate-500 font-bold uppercase tracking-wide mb-1">{labels.selectARule}</p>
-                                                    <p className="text-[10px] text-slate-600">Click a {labels.ruleInSidebar} in the sidebar to view its staged items here.</p>
+                                                    <p className="text-xs text-slate-600">Click a {labels.ruleInSidebar} in the sidebar to view its staged items here.</p>
                                                 </div>
                                             ) : stageItems.length === 0 ? (
                                                 <div className="flex flex-col items-center justify-center h-full text-center px-4">
                                                     <Icon name="folder" size={24} className="text-slate-600 mb-3" />
                                                     <p className="text-xs text-slate-500 font-bold uppercase tracking-wide mb-1">No Items Staged</p>
-                                                    <p className="text-[10px] text-slate-600">No items are assigned to <strong className="text-purple-400">{stageRule}</strong>{stageSubpart && stageSubpart !== '__all_rule__' ? ` › ${stageSubpart}` : ''} yet.</p>
+                                                    <p className="text-xs text-slate-600">No items are assigned to <strong className="text-purple-400">{stageRule}</strong>{stageSubpart && stageSubpart !== '__all_rule__' ? ` › ${stageSubpart}` : ''} yet.</p>
                                                 </div>
                                             ) : (
                                                 stageItems.map((item, idx) => (
                                                     <div
                                                         key={item.id_item}
+                                                        data-testid={`stage-card-${item.id_item}`}
                                                         draggable
                                                         onDragStart={(e) => { stageDragIdx.current = idx; e.dataTransfer.setData('text/plain', item.id_item); e.dataTransfer.effectAllowed = 'move'; }}
                                                         onDragOver={(e) => {
@@ -2687,7 +3243,9 @@
                                                             e.preventDefault();
                                                             e.stopPropagation();
                                                             const itemId = e.dataTransfer.getData('text/plain');
-                                                            if (stageDragIdx.current !== null) {
+                                                            if (itemId && supportTarget?.surface === 'stage' && supportTarget.parentId === item.id_item) {
+                                                                nestItemUnder(itemId, item.id_item, 'stage');
+                                                            } else if (stageDragIdx.current !== null) {
                                                                 // Internal reorder
                                                                 reorderStageItems(stageDragIdx.current, idx);
                                                             } else if (itemId && stageRule) {
@@ -2701,14 +3259,44 @@
                                                         onDragEnd={() => { stageDragIdx.current = null; setStageDragOverIdx(null); }}
                                                         onClick={() => { setSelectedItemId(item.id_item); setView('inspector'); }}
                                                         className={`p-3 rounded-lg border bg-slate-900 cursor-grab active:cursor-grabbing transition-colors group ${
-                                                            stageDragOverIdx === idx
+                                                            supportTarget?.surface === 'stage' && supportTarget.parentId === item.id_item
+                                                                ? 'border-amber-500 ring-1 ring-amber-500/50 bg-amber-950/20'
+                                                                : stageDragOverIdx === idx
                                                                 ? 'border-purple-500 bg-purple-900/20'
                                                                 : 'border-slate-800 hover:border-purple-500/40 hover:bg-slate-800/80'
                                                         }`}
                                                     >
-                                                        <div className="flex items-start justify-between gap-2 mb-1">
-                                                            <span className="text-[10px] font-mono text-purple-400/70 font-bold">#{item._stageOrder}</span>
-                                                            <div className="flex items-center gap-1">
+                                                        <div className="flex flex-wrap items-start gap-2 mb-2">
+                                                            <span className="text-xs font-mono text-purple-400/70 font-bold">#{item._stageOrder}</span>
+                                                            <div className="card-actions">
+                                                                <button
+                                                                    type="button"
+                                                                    aria-label={`Edit ${item.quote_original || item.id_item}`}
+                                                                    onClick={(event) => {
+                                                                        event.stopPropagation();
+                                                                        setSelectedItemId(item.id_item);
+                                                                        setView('inspector');
+                                                                    }}
+                                                                    className="card-action"
+                                                                    title="Edit in Inspector"
+                                                                >
+                                                                    <CardActionIcon name="edit" />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    aria-label={`Support ${item.quote_original || item.id_item} in Stage`}
+                                                                    aria-pressed={supportTarget?.surface === 'stage' && supportTarget.parentId === item.id_item}
+                                                                    onClick={(event) => {
+                                                                        event.stopPropagation();
+                                                                        setSupportTarget(current => current?.surface === 'stage' && current.parentId === item.id_item
+                                                                            ? null
+                                                                            : { surface: 'stage', parentId: item.id_item });
+                                                                    }}
+                                                                    className="card-action"
+                                                                    title="Support: click, then drag an item onto this card"
+                                                                >
+                                                                    <CardActionIcon name="support" />
+                                                                </button>
                                                                 <button
                                                                     type="button"
                                                                     aria-label={`Move item ${idx + 1} up`}
@@ -2717,10 +3305,10 @@
                                                                         event.stopPropagation();
                                                                         reorderStageItems(idx, idx - 1);
                                                                     }}
-                                                                    className="p-0.5 rounded text-slate-500 hover:text-purple-300 hover:bg-purple-900/40 focus:outline-none focus:ring-1 focus:ring-purple-400 disabled:opacity-25 disabled:cursor-not-allowed"
+                                                                    className="card-action"
                                                                     title="Move up"
                                                                 >
-                                                                    <Icon name="arrow-up" size={11} />
+                                                                    <CardActionIcon name="up" />
                                                                 </button>
                                                                 <button
                                                                     type="button"
@@ -2730,13 +3318,13 @@
                                                                         event.stopPropagation();
                                                                         reorderStageItems(idx, idx + 1);
                                                                     }}
-                                                                    className="p-0.5 rounded text-slate-500 hover:text-purple-300 hover:bg-purple-900/40 focus:outline-none focus:ring-1 focus:ring-purple-400 disabled:opacity-25 disabled:cursor-not-allowed"
+                                                                    className="card-action"
                                                                     title="Move down"
                                                                 >
-                                                                    <Icon name="arrow-down" size={11} />
+                                                                    <CardActionIcon name="down" />
                                                                 </button>
                                                                 {item.id_script > 0 ? (
-                                                                    <span className="text-[8px] bg-green-900/50 text-green-400 px-1 py-0.5 rounded font-bold">DRAFT</span>
+                                                                    <span className="text-xs bg-green-900/50 text-green-400 px-1 py-0.5 rounded font-bold">DRAFT</span>
                                                                 ) : (
                                                                     <button
                                                                         onClick={(e) => {
@@ -2744,7 +3332,7 @@
                                                                             const maxScript = items.reduce((max, it) => ((it.id_script || 0) > max ? (it.id_script || 0) : max), 0);
                                                                             saveItems(items.map(it => it.id_item === item.id_item ? { ...it, id_script: maxScript + 1 } : it));
                                                                         }}
-                                                                        className="opacity-0 group-hover:opacity-100 text-[8px] bg-green-900/30 border border-green-700/50 text-green-500 hover:bg-green-800/50 px-1 py-0.5 rounded font-bold transition-opacity"
+                                                                        className="text-xs bg-green-900/30 border border-green-700/50 text-green-400 hover:bg-green-800/50 px-1 py-0.5 rounded font-bold"
                                                                         title="Add to Draft"
                                                                     >
                                                                         +Draft
@@ -2756,7 +3344,38 @@
                                                             {item.quote_original || <span className="text-slate-600 italic">No quote</span>}
                                                         </p>
                                                         {item.short_cite && (
-                                                            <p className="text-[10px] text-slate-600 mt-1 font-mono truncate">— {item.short_cite}</p>
+                                                            <p className="text-xs text-slate-600 mt-1 font-mono truncate">— {item.short_cite}</p>
+                                                        )}
+                                                        {getSupportChildren(item.id_item).length > 0 && (
+                                                            <div className="mt-2 pt-2 border-t border-amber-900/40 space-y-1">
+                                                                <div className="text-xs font-bold text-amber-400 flex items-center gap-1">
+                                                                    <Icon name="git-branch" size={11} />
+                                                                    {getSupportChildren(item.id_item).length} supporting item{getSupportChildren(item.id_item).length === 1 ? '' : 's'}
+                                                                </div>
+                                                                {getSupportChildren(item.id_item).map(child => (
+                                                                    <div
+                                                                        key={child.id_item}
+                                                                        data-testid={`stage-support-${child.id_item}`}
+                                                                        className="bg-slate-950/70 border border-amber-900/40 rounded p-2 flex items-start gap-2"
+                                                                    >
+                                                                        <p className="text-xs text-slate-300 leading-relaxed line-clamp-3 flex-1">
+                                                                            {child.quote_original || child.user_01_comments || child.id_item}
+                                                                        </p>
+                                                                        <button
+                                                                            type="button"
+                                                                            aria-label={`Remove ${child.quote_original || child.id_item} from support group`}
+                                                                            onClick={(event) => {
+                                                                                event.stopPropagation();
+                                                                                unnestItem(child.id_item);
+                                                                            }}
+                                                                            className="card-action"
+                                                                            title="Un-nest item"
+                                                                        >
+                                                                            Un-nest
+                                                                        </button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
                                                         )}
                                                     </div>
                                                 ))
@@ -2791,7 +3410,7 @@
 
                                 {/* E015: Quick-filter chips */}
                                 <div className="max-w-7xl mx-auto mb-4 flex items-center gap-2 flex-wrap">
-                                    <span className="text-[10px] uppercase font-bold text-slate-600 mr-1"><Icon name="filter" size={10} className="inline" /> Filters</span>
+                                    <span className="text-xs uppercase font-bold text-slate-600 mr-1"><Icon name="filter" size={10} className="inline" /> Filters</span>
                                     {QUICK_FILTERS.map(f => {
                                         const isActive = activeFilters.has(f.key);
                                         const colorMap = {
@@ -2815,10 +3434,10 @@
                                     {activeFilters.size > 0 && (
                                         <button
                                             onClick={() => setActiveFilters(new Set())}
-                                            className="text-[10px] text-slate-500 hover:text-white px-1.5 py-0.5 rounded transition-colors"
+                                            className="text-xs text-slate-500 hover:text-white px-1.5 py-0.5 rounded transition-colors"
                                         >Clear all</button>
                                     )}
-                                    <span className="ml-auto text-[10px] text-slate-600">
+                                    <span className="ml-auto text-xs text-slate-600">
                                         {filteredItems.length !== items.length
                                             ? `Showing ${filteredItems.length} of ${items.length} items`
                                             : `${items.length} items`}
@@ -2879,14 +3498,14 @@
                                                 <div className="flex justify-between items-start">
                                                     <div className="flex gap-1 flex-wrap">
                                                         {isBulkSelected && (
-                                                            <span className="text-[10px] bg-indigo-600 text-white px-1.5 py-0.5 rounded font-bold">
+                                                            <span className="text-xs bg-indigo-600 text-white px-1.5 py-0.5 rounded font-bold">
                                                                 <Icon name="check" size={10} />
                                                             </span>
                                                         )}
                                                         {item.rule_name && item.rule_name.map((rn, i) => (
-                                                            <span key={i} className="text-[10px] bg-indigo-900/30 text-indigo-300 border border-indigo-800/40 px-1.5 py-0.5 rounded flex items-center gap-1">
+                                                            <span key={i} className="text-xs bg-indigo-900/30 text-indigo-300 border border-indigo-800/40 px-1.5 py-0.5 rounded flex items-center gap-1">
                                                                 {rn}
-                                                                <span className="text-indigo-500/60 text-[8px]">({ruleByName.get(rn)?.itemCount || 0})</span>
+                                                                <span className="text-indigo-500/60 text-xs">({ruleByName.get(rn)?.itemCount || 0})</span>
                                                             </span>
                                                         ))}
                                                     </div>
@@ -2902,7 +3521,7 @@
                                                         <div>
                                                             <div className="flex items-center gap-1 mb-1">
                                                                 <Icon name="search" size={10} className="text-amber-500" />
-                                                                <span className="text-[9px] uppercase font-bold text-amber-500">DRR Report — needs original quote</span>
+                                                                <span className="text-xs uppercase font-bold text-amber-500">DRR Report — needs original quote</span>
                                                             </div>
                                                             <p className="text-slate-400 text-sm font-serif leading-relaxed line-clamp-4 italic">
                                                                 {item.user_01_comments}
@@ -2920,8 +3539,8 @@
                                                     )}
                                                 </div>
 
-                                                <div className="pt-3 border-t border-slate-800 mt-2 flex justify-between items-center gap-2 text-xs text-slate-500">
-                                                    <span className="flex items-center gap-1 hover:text-indigo-400">
+                                                <div className="pt-3 border-t border-slate-800 mt-2 flex flex-wrap justify-between items-center gap-2 text-xs text-slate-500">
+                                                    <span className="flex flex-1 min-w-0 items-center gap-1 hover:text-indigo-400 [overflow-wrap:anywhere]">
                                                         <Icon name="book-open" size={12} />
                                                         {src ? src.short_cite : <span className="text-red-900">No Source Linked</span>}
                                                     </span>
@@ -2934,14 +3553,14 @@
                                                                 event.stopPropagation();
                                                                 assignItemToRule(item.id_item, stageRule, stageTargetSubpart);
                                                             }}
-                                                            className="ml-auto shrink-0 bg-purple-900/40 border border-purple-700/60 text-purple-300 hover:bg-purple-800/60 focus:outline-none focus:ring-2 focus:ring-purple-400 px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                            className="ml-auto shrink-0 bg-purple-900/40 border border-purple-700/60 text-purple-300 hover:bg-purple-800/60 focus:outline-none focus:ring-2 focus:ring-purple-400 px-2 py-1 rounded text-xs font-bold flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                                                             title={isAssignedToActiveStage ? 'Already assigned to the active Stage' : `Assign to ${stageRule}${stageTargetSubpart ? ` › ${stageTargetSubpart}` : ''}`}
                                                         >
                                                             <Icon name={isAssignedToActiveStage ? 'check' : 'arrow-left'} size={10} />
                                                             {isAssignedToActiveStage ? 'Staged' : 'Assign to Stage'}
                                                         </button>
                                                     )}
-                                                    <button
+                                                    <LibraryDeleteButton
                                                         onClick={(e) => {
                                                             e.stopPropagation();
                                                             requestDeleteConfirmation({
@@ -2956,13 +3575,10 @@
                                                                 },
                                                             });
                                                         }}
-                                                        className="opacity-0 group-hover:opacity-100 bg-red-900/50 border border-red-700 text-red-400 hover:bg-red-800 px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition-opacity"
-                                                    >
-                                                        <Icon name="trash-2" size={10} /> DELETE
-                                                    </button>
+                                                    />
                                                 </div>
                                                 {searchQuery && searchMatchMap.has(item.id_item) && (
-                                                    <div className="text-[9px] text-indigo-400/70 mt-1 flex items-center gap-1">
+                                                    <div className="text-xs text-indigo-400/70 mt-1 flex items-center gap-1">
                                                         <Icon name="search" size={8} />
                                                         matched in: {searchMatchMap.get(item.id_item)}
                                                     </div>
@@ -3237,9 +3853,10 @@
                                                             : sources;
                                                         return (
                                                             <div className="flex items-center gap-2">
-                                                                <label className="text-xs text-slate-500 uppercase font-bold shrink-0">Connect:</label>
+                                                                <label htmlFor="source-connect-search" className="text-xs text-slate-500 uppercase font-bold shrink-0">Connect:</label>
                                                                 <div className="flex items-center gap-1">
                                                                     <input
+                                                                        id="source-connect-search"
                                                                         type="text"
                                                                         className="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded px-2 py-1 w-[240px] focus:border-emerald-500 outline-none"
                                                                         placeholder={currentSource ? currentSource.short_cite : '-- Search sources --'}
@@ -3291,16 +3908,16 @@
                                                     return linkedSource ? (
                                                         <div className="bg-slate-950/50 p-4 rounded border border-slate-800/50 text-sm text-slate-400 grid grid-cols-2 gap-4">
                                                             <div>
-                                                                <span className="block text-[10px] uppercase text-slate-600 font-bold">Title</span>
+                                                                <span className="block text-xs uppercase text-slate-600 font-bold">Title</span>
                                                                 <span className="text-slate-200">{linkedSource.title}</span>
                                                             </div>
                                                             <div>
-                                                                <span className="block text-[10px] uppercase text-slate-600 font-bold">Author</span>
+                                                                <span className="block text-xs uppercase text-slate-600 font-bold">Author</span>
                                                                 <span className="text-slate-200">{linkedSource.author}</span>
                                                             </div>
                                                             {linkedSource.url && (
                                                                 <div className="col-span-2">
-                                                                    <span className="block text-[10px] uppercase text-slate-600 font-bold">URL</span>
+                                                                    <span className="block text-xs uppercase text-slate-600 font-bold">URL</span>
                                                                     <a href={linkedSource.url} target="_blank" rel="noreferrer"
                                                                        className="text-emerald-400 hover:text-emerald-300 text-xs break-all transition-colors">
                                                                         {linkedSource.url}
@@ -3308,7 +3925,7 @@
                                                                 </div>
                                                             )}
                                                             <div className="col-span-2">
-                                                                <span className="block text-[10px] uppercase text-slate-600 font-bold">Details</span>
+                                                                <span className="block text-xs uppercase text-slate-600 font-bold">Details</span>
                                                                 <span className="text-slate-200">{linkedSource.additional_source_details}</span>
                                                             </div>
                                                         </div>
@@ -3360,6 +3977,7 @@
                             // Compute draft items and script parts
                             const draftItems = items
                                 .filter(d => (d.id_script || 0) > 0)
+                                .filter(d => !d.nested_under)
                                 .filter(d => selectedScriptPart === '__all__' || d.script_part === selectedScriptPart)
                                 .sort((a, b) => (a.id_script || 0) - (b.id_script || 0));
                             const availableScriptParts = [...new Set(items.filter(d => (d.id_script || 0) > 0 && d.script_part).map(d => d.script_part))].sort();
@@ -3400,6 +4018,16 @@
                                                 {draftItems.length} items{selectedScriptPart !== '__all__' ? ` in ${selectedScriptPart}` : ' in draft'}
                                                 {' '}• Set id_script on items in the Inspector to add them here
                                             </p>
+                                            <div className="mt-4">
+                                                <button
+                                                    ref={draftProjectButtonRef}
+                                                    type="button"
+                                                    onClick={beginProjectExtraction}
+                                                    disabled={!itemsReady || !sourcesReady}
+                                                    className="card-action"
+                                                >Create project from Draft</button>
+                                                <p className="text-sm text-slate-300 mt-2">Copy all Draft cards and their supporting cards into a new project, with an empty Draft for a fresh story order.</p>
+                                            </div>
                                         </div>
 
                                         {draftItems.length === 0 && (
@@ -3413,30 +4041,78 @@
                                         {draftItems.map((item, i) => (
                                             <div
                                                 key={item.id_item}
-                                                className="mb-4 p-4 rounded-lg border bg-slate-900 border-slate-800 hover:border-slate-700 group"
+                                                data-testid={`draft-card-${item.id_item}`}
+                                                draggable
+                                                onDragStart={(event) => {
+                                                    event.dataTransfer.setData('text/plain', item.id_item);
+                                                    event.dataTransfer.effectAllowed = 'move';
+                                                }}
+                                                onDragOver={(event) => {
+                                                    if (supportTarget?.surface === 'draft' && supportTarget.parentId === item.id_item) {
+                                                        event.preventDefault();
+                                                        event.dataTransfer.dropEffect = 'move';
+                                                    }
+                                                }}
+                                                onDrop={(event) => {
+                                                    if (supportTarget?.surface !== 'draft' || supportTarget.parentId !== item.id_item) return;
+                                                    event.preventDefault();
+                                                    event.stopPropagation();
+                                                    nestItemUnder(event.dataTransfer.getData('text/plain'), item.id_item, 'draft');
+                                                }}
+                                                className={`mb-4 p-4 rounded-lg border bg-slate-900 group cursor-grab active:cursor-grabbing ${
+                                                    supportTarget?.surface === 'draft' && supportTarget.parentId === item.id_item
+                                                        ? 'border-amber-500 ring-1 ring-amber-500/50 bg-amber-950/20'
+                                                        : 'border-slate-800 hover:border-slate-700'
+                                                }`}
                                             >
-                                                <div className="flex justify-between items-start mb-3">
-                                                    <div className="flex items-center gap-2">
+                                                <div className="flex flex-wrap items-start gap-2 mb-3">
+                                                    <div className="flex flex-wrap items-center gap-2 min-w-0">
                                                         <span className="text-xs font-mono text-green-400 font-bold">#{item.id_script}</span>
-                                                        {item.script_part && <span className="text-[10px] bg-green-900/50 px-1.5 py-0.5 rounded text-green-400 uppercase">{item.script_part}</span>}
+                                                        {item.script_part && <span className="text-xs bg-green-900/50 px-1.5 py-0.5 rounded text-green-400 uppercase">{item.script_part}</span>}
                                                         {(item.rule_name || []).map((r, ri) => (
-                                                            <span key={ri} className="text-[10px] bg-slate-800 px-1.5 py-0.5 rounded text-slate-400">{r}</span>
+                                                            <span key={ri} className="text-xs bg-slate-800 px-1.5 py-0.5 rounded text-slate-400">{r}</span>
                                                         ))}
                                                     </div>
-                                                    <div className="flex items-center gap-1">
+                                                    <div className="card-actions">
                                                         <button
-                                                            onClick={() => { setSelectedItemId(item.id_item); setView('inspector'); }}
-                                                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-700 rounded text-slate-400 transition-opacity"
+                                                            type="button"
+                                                            aria-label={`Edit ${item.quote_original || item.id_item}`}
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
+                                                                setSelectedItemId(item.id_item);
+                                                                setView('inspector');
+                                                            }}
+                                                            className="card-action"
                                                             title="Edit in Inspector"
                                                         >
-                                                            <Icon name="edit" size={14} />
+                                                            <CardActionIcon name="edit" />
                                                         </button>
                                                         <button
-                                                            onClick={() => removeFromFinalScript(item.id_item)}
-                                                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-900/50 rounded text-red-400 transition-opacity"
+                                                            type="button"
+                                                            aria-label={`Support ${item.quote_original || item.id_item} in Draft`}
+                                                            aria-pressed={supportTarget?.surface === 'draft' && supportTarget.parentId === item.id_item}
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
+                                                                setSupportTarget(current => current?.surface === 'draft' && current.parentId === item.id_item
+                                                                    ? null
+                                                                    : { surface: 'draft', parentId: item.id_item });
+                                                            }}
+                                                            className="card-action"
+                                                            title="Support: click, then drag an item onto this card"
+                                                        >
+                                                            <CardActionIcon name="support" />
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            aria-label={`Remove ${item.quote_original || item.id_item} from Draft`}
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
+                                                                removeFromFinalScript(item.id_item);
+                                                            }}
+                                                            className="card-action"
                                                             title="Remove from Draft"
                                                         >
-                                                            <Icon name="x" size={14} />
+                                                            Remove
                                                         </button>
                                                     </div>
                                                 </div>
@@ -3468,7 +4144,44 @@
                                                 </div>
 
                                                 {item.short_cite && (
-                                                    <div className="mt-2 text-[10px] text-slate-600 font-mono">— {item.short_cite}</div>
+                                                    <div className="mt-2 text-xs text-slate-600 font-mono">— {item.short_cite}</div>
+                                                )}
+
+                                                {getSupportChildren(item.id_item).length > 0 && (
+                                                    <div className="mt-3 pt-3 border-t border-amber-900/40 space-y-2">
+                                                        <div className="text-xs font-bold text-amber-400 flex items-center gap-1">
+                                                            <Icon name="git-branch" size={12} />
+                                                            {getSupportChildren(item.id_item).length} supporting item{getSupportChildren(item.id_item).length === 1 ? '' : 's'}
+                                                        </div>
+                                                        {getSupportChildren(item.id_item).map(child => (
+                                                            <div
+                                                                key={child.id_item}
+                                                                data-testid={`draft-support-${child.id_item}`}
+                                                                className="ml-4 bg-slate-950/70 border border-amber-900/40 rounded p-3 flex items-start gap-3"
+                                                            >
+                                                                <div className="flex-1 min-w-0">
+                                                                    <p className="text-sm text-slate-300 leading-relaxed">
+                                                                        {child.quote_original || child.user_01_comments || child.id_item}
+                                                                    </p>
+                                                                    {child.short_cite && (
+                                                                        <p className="text-xs text-slate-600 mt-1 font-mono">— {child.short_cite}</p>
+                                                                    )}
+                                                                </div>
+                                                                <button
+                                                                    type="button"
+                                                                    aria-label={`Remove ${child.quote_original || child.id_item} from support group`}
+                                                                    onClick={(event) => {
+                                                                        event.stopPropagation();
+                                                                        unnestItem(child.id_item);
+                                                                    }}
+                                                                    className="card-action"
+                                                                    title="Un-nest item"
+                                                                >
+                                                                    Un-nest
+                                                                </button>
+                                                            </div>
+                                                        ))}
+                                                    </div>
                                                 )}
                                             </div>
                                         ))}
@@ -3634,7 +4347,7 @@
                                                     <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
                                                         {item.script_part || (item.rule_name || [])[0] || 'SEGMENT ' + (i + 1)}
                                                     </span>
-                                                    <span className="text-[10px] font-mono text-slate-600">#{item.id_script}</span>
+                                                    <span className="text-xs font-mono text-slate-600">#{item.id_script}</span>
                                                 </div>
 
                                                 {/* Main content: user_02_comments (editable, auto-expanding) */}
@@ -3762,23 +4475,25 @@
                                                     <span className="text-xs text-slate-500 font-mono truncate flex-1">{parseResult.selected_path || parseResult.filepath || ''}</span>
                                                     <div className="flex items-center gap-2 shrink-0">
                                                         <button
-                                                            disabled={parserCollisions.length > 0}
+                                                            disabled={parseSaving || parserCollisions.length > 0}
                                                             title={parserCollisions.length > 0 ? 'Resolve source ID collisions before saving' : ''}
                                                             onClick={async () => {
+                                                                setParseSaving(true);
+                                                                setParseError(null);
                                                                 try {
                                                                     await flushAllPendingDocumentSaves();
-                                                                    const r = await api('save_new_document', {
+                                                                    const r = await api('save_import_document', {
                                                                         method: 'POST',
                                                                         headers: { 'Content-Type': 'application/json' },
                                                                         body: JSON.stringify({
                                                                             items: parseResult.items,
                                                                             sources: parseResult.sources,
+                                                                            selected_path: parseResult.selected_path || parseResult.filepath,
                                                                             items_document: itemsDocumentRef.current,
                                                                             sources_document: sourcesDocumentRef.current,
                                                                         })
                                                                     });
                                                                     const d = await readApiResponse(r);
-                                                                    if (d.status === 'canceled') return;
                                                                     // Reload — apply full normalization same as initial fetchData
                                                                     const reload = await api('data');
                                                                     const fresh = await readApiResponse(reload);
@@ -3796,12 +4511,16 @@
                                                                         document: fresh.sources_document,
                                                                     });
                                                                     setParseResult(null);
-                                                                    setStatus('Saved to new file and loaded');
-                                                                } catch (e) { setParseError('Server error: ' + e.message); }
+                                                                    setStatus(`Saved ${d.items_filename} and ${d.sources_filename}`);
+                                                                } catch (e) {
+                                                                    setParseError('Save failed: ' + e.message);
+                                                                } finally {
+                                                                    setParseSaving(false);
+                                                                }
                                                             }}
                                                             className="bg-orange-600 hover:bg-orange-500 text-white px-4 py-1.5 rounded font-bold text-xs flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                                         >
-                                                            <Icon name="file-plus" size={14} /> Save to New File
+                                                            <Icon name="file-plus" size={14} /> {parseSaving ? 'Saving...' : 'Save to New File'}
                                                         </button>
                                                         <button
                                                             disabled={parseSaving || parserCollisions.length > 0}
@@ -3919,18 +4638,18 @@
                                                             <div className="flex items-start justify-between gap-3 mb-2">
                                                                 <div className="flex items-center gap-2 flex-wrap">
                                                                     {(item.category_part_name || []).map((cat, ci) => (
-                                                                        <span key={ci} className="text-[10px] bg-indigo-900/40 text-indigo-300 px-1.5 py-0.5 rounded font-bold">{cat}</span>
+                                                                        <span key={ci} className="text-xs bg-indigo-900/40 text-indigo-300 px-1.5 py-0.5 rounded font-bold">{cat}</span>
                                                                     ))}
                                                                     {(item.subpart_name || []).filter(s => s).map((sub, si) => (
-                                                                        <span key={si} className="text-[10px] bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded">{sub}</span>
+                                                                        <span key={si} className="text-xs bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded">{sub}</span>
                                                                     ))}
                                                                 </div>
-                                                                <span className="text-[10px] text-slate-600 font-mono shrink-0">#{i + 1}</span>
+                                                                <span className="text-xs text-slate-600 font-mono shrink-0">#{i + 1}</span>
                                                             </div>
                                                             <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap">{item.quote_original}</p>
                                                             <div className="flex items-center gap-3 mt-2">
-                                                                {item.short_cite && <span className="text-[10px] text-emerald-500 font-mono truncate">{item.short_cite}</span>}
-                                                                {(item.related_facts || []).length > 0 && <span className="text-[10px] text-amber-500/60">multi-cite group</span>}
+                                                                {item.short_cite && <span className="text-xs text-emerald-500 font-mono truncate">{item.short_cite}</span>}
+                                                                {(item.related_facts || []).length > 0 && <span className="text-xs text-amber-500/60">multi-cite group</span>}
                                                             </div>
                                                         </div>
                                                     ))}
