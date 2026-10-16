@@ -473,16 +473,20 @@ test('icon-only controls have explicit accessible names', async ({ page }) => {
   const state = useFakeDocuments(page);
   state.items.a[0] = {
     ...state.items.a[0],
-    rule_name: ['Accessibility'],
-    rule_number: ['13'],
-    subpart_name: ['Semantics'],
-    subpart_number: ['1'],
-    id_subpart: [1],
+    rule_name: ['Accessibility', 'Extra'],
+    rule_number: ['13', '14'],
+    subpart_name: ['Semantics', ''],
+    subpart_number: ['1', ''],
+    id_subpart: [1, 0],
   };
   await page.goto(baseURL);
   await page.getByText('Document A original', { exact: false }).click();
 
-  await expect(page.getByRole('button', { name: 'Delete rule row 1' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Delete rule row 1' })).toHaveCount(0);
+  const removeRule = page.getByRole('button', { name: 'Delete rule row 2' });
+  await expect(removeRule).toBeVisible();
+  await expect(removeRule).toHaveCSS('opacity', '1');
+  await expect(removeRule.locator('svg')).toBeVisible();
   await page.getByTitle('Show Stage').click();
   await expect(page.getByRole('button', { name: 'Close Stage' })).toBeVisible();
 });
