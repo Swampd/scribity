@@ -8,7 +8,10 @@ echo.
 
 cd /d "%~dp0"
 
-rem Prefer the Windows Python launcher, but also support a normal Python install.
+rem Prefer this project's installed environment, even without Python on PATH.
+if exist ".venv\Scripts\python.exe" goto run_with_venv
+
+rem Fall back to the Windows Python launcher or a normal Python install.
 py -3 --version >nul 2>&1
 if not errorlevel 1 goto run_with_py
 
@@ -22,6 +25,10 @@ echo.
 pause
 endlocal
 exit /b 1
+
+:run_with_venv
+set SCRIBITY_PYTHON=".venv\Scripts\python.exe"
+goto start_scribity
 
 :run_with_py
 set "SCRIBITY_PYTHON=py -3"

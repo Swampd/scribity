@@ -1,0 +1,11 @@
+{
+  "report_id": "sample-history-report",
+  "schema_version": 1,
+  "publishedOn": "2026-10-16",
+  "updatedOn": "2026-10-17",
+  "quotes": ["A sample event occurred in 1901.", "A different sample event occurred in 1976.", "A different sample event occurred in 1976."],
+  "citation_numbers": [1, 1, 2],
+  "event_dates": ["", "", ""],
+  "source_count": 2,
+  "diagnostic_codes": []
+}

@@ -784,6 +784,33 @@ def save_sources_endpoint():
             return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def import_readiness_error(payload, items, sources):
+    """Enforce parser diagnostics at the write boundary, not just in the UI."""
+    diagnostics = payload.get('diagnostics', [])
+    if not isinstance(diagnostics, list):
+        return 'Import diagnostics must be a list.'
+    if payload.get('can_import') is False or any(
+        not isinstance(d, dict) or d.get('severity') == 'error' for d in diagnostics
+    ):
+        return 'Import stopped: resolve the errors in the report preview first.'
+    for record in items + sources:
+        provenance = record.get('report_provenance')
+        if provenance is None:
+            continue  # Existing non-DRR documents retain their ordinary save behavior.
+        if not isinstance(provenance, dict) or provenance.get('import_ready') is not True:
+            return 'Import stopped: report provenance is incomplete or marked not ready.'
+    return None
+
+
+def report_identities(records):
+    identities = set()
+    for record in records:
+        provenance = record.get('report_provenance')
+        if isinstance(provenance, dict) and isinstance(provenance.get('report_id'), str):
+            identities.add(provenance['report_id'])
+    return identities
+
+
 @app.route('/api/append_import', methods=['POST'])
 def append_import():
     """Persist the post-import item and source snapshots as one operation."""
@@ -805,6 +832,10 @@ def append_import():
             validate_document_structure(data, name.capitalize())
         except JsonDocumentShapeError as error:
             return invalid_document_shape_response(error, name)
+
+    readiness_error = import_readiness_error(payload, items_data, sources_data)
+    if readiness_error:
+        return jsonify(status="error", kind="import_not_ready", message=readiness_error), 422
 
     imported_sources = payload.get('imported_sources')
     if imported_sources is not None:
@@ -830,6 +861,19 @@ def append_import():
                 existing_sources = load_json(SOURCES_PATH)
             except JsonDocumentError as error:
                 return json_document_error_response(error, "sources")
+
+            try:
+                existing_items = load_json(ITEMS_PATH)
+            except JsonDocumentError as error:
+                return json_document_error_response(error, "items")
+            repeated_reports = report_identities(imported_sources) & report_identities(existing_items + existing_sources)
+            if repeated_reports:
+                return jsonify(
+                    status="error", kind="report_already_imported", report_ids=sorted(repeated_reports),
+                    message="This report is already represented in the current project: "
+                            + ", ".join(sorted(repeated_reports))
+                            + ". Append will not merge or replace your edits. Save this edition to a new file instead.",
+                ), 409
 
             collision_ids = find_source_id_collisions(existing_sources, imported_sources)
             if collision_ids:
@@ -1342,6 +1386,15 @@ def save_import_document():
         except JsonDocumentShapeError as error:
             return invalid_document_shape_response(error, name)
 
+    readiness_error = import_readiness_error(payload, items_data, sources_data)
+    if readiness_error:
+        return jsonify(status="error", kind="import_not_ready", message=readiness_error), 422
+    for name, records, identity_key in (("items", items_data, "id_item"), ("sources", sources_data, "id_source")):
+        ids = [record.get(identity_key) for record in records]
+        if any(not isinstance(identity, str) or not identity for identity in ids) or len(set(ids)) != len(ids):
+            return jsonify(status="error", kind="import_not_ready",
+                           message=f"Imported {name} require unique, nonempty identities."), 422
+
     try:
         with SAVE_LOCK:
             if not document_request_is_current("items", payload.get("items_document")):
@@ -1352,7 +1405,7 @@ def save_import_document():
             items_path, sources_path = next_available_import_paths(
                 payload.get("selected_path")
             )
-            save_json_pair(items_path, items_data, sources_path, sources_data)
+            save_json_pair(items_path, items_data, sources_path, sources_data, require_new=True)
             ITEMS_PATH = items_path
             SOURCES_PATH = sources_path
             ITEMS_READY = True

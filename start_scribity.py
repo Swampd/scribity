@@ -31,7 +31,8 @@ def main():
     app_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(app_dir)
 
-    venv_python = os.path.join(app_dir, ".venv", "bin", "python")
+    venv_parts = ("Scripts", "python.exe") if sys.platform == "win32" else ("bin", "python")
+    venv_python = os.path.join(app_dir, ".venv", *venv_parts)
     runtime_python = venv_python if os.path.isfile(venv_python) else sys.executable
 
     print("============================================")

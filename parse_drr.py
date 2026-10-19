@@ -9,18 +9,23 @@ Usage:
 """
 
 import hashlib
+import json
+from copy import deepcopy
+from datetime import date
+from urllib.parse import urlsplit
 import os
 import posixpath
 import re
 import unicodedata
 import uuid
-from typing import List, Dict, Tuple, Optional
+from typing import Optional
+
+import yaml
 
 # --- PATTERNS ---
 CITE_PATTERN = re.compile(r'\[(\d+(?:,\s*\d+)*)\]')
 SOURCE_LINE = re.compile(r'^(\d+)\.\s+(.+?),?\s*<(https?://[^>]+)>\s*$')
 TABLE_SEPARATOR = re.compile(r'^\|\s*[-:]+\s*(\|\s*[-:]+\s*)*\|$')
-JSX_LINE = re.compile(r'^\s*<\w+')
 
 # --- SOURCE TEMPLATE ---
 SOURCE_TEMPLATE = {
@@ -111,7 +116,7 @@ def _make_item(text: str, cite_num: int, section: str, subsection: str,
         'audio_tags': '',
         'id_extra_01': '',
         'id_extra_02': '',
-        'event_date_yyyy-mm-dd': report_date,
+        'event_date_yyyy-mm-dd': '',
         'event_time': '',
         'latitude': '',
         'longitude': '',
@@ -121,432 +126,299 @@ def _make_item(text: str, cite_num: int, section: str, subsection: str,
     }
 
 
-def _items_from_text(text: str, section: str, subsection: str,
-                     title: str, report_date: str, source_map: dict) -> list:
-    """Split text at citation boundaries and create items.
+class MetadataLoader(yaml.SafeLoader):
+    """Safe YAML with string keys, no duplicate keys, aliases or merge keys."""
 
-    For multi-citation like [1, 2, 3], creates duplicate items linked
-    via related_facts.
-    """
-    citations = list(CITE_PATTERN.finditer(text))
-    if not citations:
-        return []
-
-    items = []
-    prev_end = 0
-
-    for match in citations:
-        segment = text[prev_end:match.start()].strip()
-        cite_nums = [int(n.strip()) for n in match.group(1).split(',')]
-        prev_end = match.end()
-
-        if not segment:
-            continue
-
-        if len(cite_nums) == 1:
-            items.append(_make_item(segment, cite_nums[0], section, subsection,
-                                    title, report_date, source_map))
-        else:
-            # Multi-citation: duplicate items, linked via related_facts
-            group_id = f"grp_{uuid.uuid4().hex[:8]}"
-            for cn in cite_nums:
-                item = _make_item(segment, cn, section, subsection,
-                                  title, report_date, source_map)
-                item['related_facts'] = [group_id]
-                item['relates_to_other_facts'] = True
-                items.append(item)
-
-    return items
+    def construct_mapping(self, node, deep=False):
+        result = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=True)
+            if not isinstance(key, str) or key == '<<' or key in result:
+                raise ValueError('Metadata keys must be unique strings; YAML merges are unsupported.')
+            result[key] = self.construct_object(value_node, deep=True)
+        return result
 
 
-def _process_table(table_lead_in: str, table_header: str,
-                   table_separator: str, table_rows: list,
-                   section: str, subsection: str,
-                   title: str, report_date: str, source_map: dict) -> list:
-    """Process a markdown table into items.
-
-    - If all rows share the same citations: one item with full table.
-    - Otherwise: one item per row with lead-in + headers + that row.
-    - Multi-citation rows produce duplicate items linked via related_facts.
-    """
-    if not table_rows:
-        return []
-
-    items = []
-    clean_lead = CITE_PATTERN.sub('', table_lead_in).strip() if table_lead_in else ''
-
-    # Collect citations per row (merged across all columns)
-    row_cite_sets = []
-    for row in table_rows:
-        cells = row.split('|')
-        row_cites = set()
-        for cell in cells:
-            for m in CITE_PATTERN.finditer(cell):
-                for n in m.group(1).split(','):
-                    row_cites.add(int(n.strip()))
-        row_cite_sets.append(row_cites)
-
-    # Check if uniform citations across all rows
-    cited_rows = [rc for rc in row_cite_sets if rc]
-    all_uniform = (len(cited_rows) > 0 and
-                   all(rc == cited_rows[0] for rc in cited_rows))
-
-    if all_uniform and cited_rows:
-        # Uniform: one item with full table
-        full_table_lines = [table_header, table_separator] + table_rows
-        clean_table = CITE_PATTERN.sub('', '\n'.join(full_table_lines)).strip()
-        quote = f"{clean_lead}\n{clean_table}" if clean_lead else clean_table
-        cite_list = list(cited_rows[0])
-
-        if len(cite_list) == 1:
-            items.append(_make_item(quote, cite_list[0], section, subsection,
-                                    title, report_date, source_map))
-        else:
-            group_id = f"grp_{uuid.uuid4().hex[:8]}"
-            for cn in cite_list:
-                item = _make_item(quote, cn, section, subsection,
-                                  title, report_date, source_map)
-                item['related_facts'] = [group_id]
-                item['relates_to_other_facts'] = True
-                items.append(item)
-    else:
-        # Different citations per row: one item per row
-        clean_header = CITE_PATTERN.sub('', table_header).strip()
-        for i, row in enumerate(table_rows):
-            row_cites = row_cite_sets[i]
-            if not row_cites:
-                continue  # Skip uncited rows
-
-            clean_row = CITE_PATTERN.sub('', row).strip()
-            parts = [p for p in [clean_lead, clean_header, table_separator, clean_row] if p]
-            quote = '\n'.join(parts)
-            cite_list = list(row_cites)
-
-            if len(cite_list) == 1:
-                items.append(_make_item(quote, cite_list[0], section, subsection,
-                                        title, report_date, source_map))
-            else:
-                group_id = f"grp_{uuid.uuid4().hex[:8]}"
-                for cn in cite_list:
-                    item = _make_item(quote, cn, section, subsection,
-                                      title, report_date, source_map)
-                    item['related_facts'] = [group_id]
-                    item['relates_to_other_facts'] = True
-                    items.append(item)
-
-    return items
+# Keep unquoted ISO dates as strings instead of Python date objects. Other safe
+# scalar types remain available; the raw frontmatter is also retained verbatim.
+MetadataLoader.yaml_implicit_resolvers = {
+    key: [(tag, pattern) for tag, pattern in entries
+          if tag != 'tag:yaml.org,2002:timestamp']
+    for key, entries in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
 
 
 def parse_mdx_file(filepath: str, report_identity: Optional[str] = None) -> dict:
-    """Parse a single .mdx DRR report file.
+    """Extract research without executing MDX; errors make the preview unsavable.
 
-    Returns:
-        {
-            'items': [...],
-            'sources': [...],
-            'title': str,
-            'report_date': str,
-            'filepath': str,
-            'stats': { 'items': int, 'sources': int, 'sections': int }
-        }
+    Report metadata travels on every item/source so subset projects remain
+    self-contained. Publication dates never supply historical event dates.
     """
-    with open(filepath, 'r', encoding='utf-8') as f:
-        lines = f.read().split('\n')
+    with open(filepath, 'r', encoding='utf-8-sig') as handle:
+        raw = handle.read()
+    lines = raw.splitlines()
+    legacy_identity = _normalize_report_identity(report_identity or os.path.basename(filepath))
+    diagnostics, collisions = [], []
 
-    if report_identity is None:
-        report_identity = os.path.basename(filepath)
-    report_identity = _normalize_report_identity(report_identity)
+    def diagnose(code, message, line=1, excerpt='', severity='error'):
+        diagnostics.append(dict(code=code, severity=severity, message=message,
+                                line=line, excerpt=excerpt, filename=os.path.basename(filepath)))
 
-    # --- Phase 1: Frontmatter ---
-    report_date = ''
-    frontmatter_end = 0
+    metadata, frontmatter, start = {}, '', 0
     if lines and lines[0].strip() == '---':
-        for i in range(1, len(lines)):
-            if lines[i].strip() == '---':
-                frontmatter_end = i + 1
-                break
-            m = re.match(r'publishedOn:\s*"(.+?)"', lines[i].strip())
-            if m:
-                report_date = m.group(1)
+        end = next((n for n in range(1, len(lines)) if lines[n].strip() == '---'), None)
+        if end is None:
+            diagnose('invalid_frontmatter', 'Frontmatter has no closing --- delimiter.', 1, raw)
+            start = len(lines)
+        else:
+            frontmatter = '\n'.join(lines[1:end])
+            start = end + 1
+            try:
+                if any(isinstance(token, yaml.tokens.AliasToken) for token in yaml.scan(frontmatter)):
+                    raise ValueError('YAML aliases are unsupported; write the values explicitly.')
+                metadata = yaml.load(frontmatter, Loader=MetadataLoader)
+                if not isinstance(metadata, dict):
+                    raise ValueError('Frontmatter must be a mapping of named fields.')
+                json.dumps(metadata, allow_nan=False)
+            except (yaml.YAMLError, ValueError, TypeError, RecursionError) as error:
+                metadata = {}
+                diagnose('invalid_frontmatter', f'Cannot safely read metadata: {error}', 1, frontmatter)
+    else:
+        diagnose('missing_frontmatter', 'Legacy report has no YAML frontmatter.', severity='warning')
 
-    # --- Phase 2: Title ---
-    title = ''
-    for i in range(frontmatter_end, len(lines)):
-        s = lines[i].strip()
-        if s.startswith('# ') and not s.startswith('## '):
-            title = s[2:].strip()
-            break
+    version = metadata.get('drrSchemaVersion')
+    report_id = metadata.get('reportId')
+    if 'drrSchemaVersion' not in metadata:
+        diagnose('legacy_report', 'Unversioned report: add drrSchemaVersion: 1 and a permanent reportId. '
+                 'Without reportId, renaming changes identity.', severity='warning')
+    elif type(version) is not int or version != 1:
+        diagnose('unsupported_version', 'Supported drrSchemaVersion is the integer 1.', 1, frontmatter)
+    if report_id is not None and (not isinstance(report_id, str) or not report_id.strip()):
+        diagnose('missing_report_id', 'reportId must be a nonempty permanent string.', 1, frontmatter)
+        report_id = None
+    if version is not None and not report_id:
+        diagnose('missing_report_id', 'Versioned reports require a permanent reportId.', 1, frontmatter)
+    identity = report_id or legacy_identity
+    for field in ('publishedOn', 'updatedOn'):
+        value = metadata.get(field)
+        if value is not None:
+            try:
+                if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+                    raise ValueError()
+                date.fromisoformat(value)
+            except ValueError:
+                diagnose('invalid_publication_date', f'{field} must be YYYY-MM-DD or null; it is not an event year.',
+                         1, frontmatter)
+    if version == 1 and 'publishedOn' not in metadata:
+        diagnose('missing_publication_date', 'Include publishedOn with an actual date or null for an unpublished report.',
+                 1, frontmatter)
 
-    # --- Phase 3: Sources section (parse from end) ---
-    sources_start = None
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].strip() == '## Sources':
-            sources_start = i
-            break
+    title = next((line.strip()[2:].strip() for line in lines[start:] if line.strip().startswith('# ')),
+                 metadata.get('title') if isinstance(metadata.get('title'), str) else '')
+    if not title:
+        diagnose('missing_title', 'Add a # Report title heading or title metadata.')
+    report = dict(report_id=identity, identity_kind='explicit' if report_id else 'legacy_path',
+                  schema_version=version, title=title, metadata=metadata,
+                  content_sha256=hashlib.sha256(raw.encode('utf-8')).hexdigest(),
+                  raw_frontmatter=frontmatter)
 
+    source_headings = [n for n in range(start, len(lines)) if lines[n].strip() == '## Sources']
+    body_end = source_headings[0] if source_headings else len(lines)
+    if len(source_headings) != 1:
+        diagnose('sources_section', 'Use exactly one final ## Sources section.')
     source_map = {}
-    collisions = []
-    if sources_start is not None:
-        for i in range(sources_start + 1, len(lines)):
-            m = SOURCE_LINE.match(lines[i].strip())
-            if m:
-                cn = int(m.group(1))
-                source = _make_source(
-                    cn,
-                    m.group(2).strip(),
-                    m.group(3).strip(),
-                    report_identity,
-                )
-                if cn in source_map:
-                    collisions.append({
-                        'kind': 'source_id_collision',
-                        'id_source': source['id_source'],
-                        'reports': [report_identity],
-                        'message': (
-                            f"Citation {cn} is defined more than once in "
-                            f"{report_identity}."
-                        ),
-                    })
-                    continue
-                source_map[cn] = source
+    if source_headings:
+        for n in range(body_end + 1, len(lines)):
+            text = lines[n].strip()
+            if not text:
+                continue
+            match = SOURCE_LINE.fullmatch(text)
+            if not match:
+                diagnose('malformed_source', 'Use one entry per line: 1. Source title <https://example.com/document>.', n + 1, lines[n])
+                continue
+            cn = int(match[1])
+            url = match[3]
+            if cn < 1 or re.search(r'[\s<>\[\]]', url) or not urlsplit(url).hostname:
+                diagnose('malformed_source', 'Use a positive source number and a direct HTTP(S) URL.', n + 1, lines[n])
+                continue
+            source = _make_source(cn, match[2].strip(), url, identity)
+            if cn in source_map:
+                diagnose('duplicate_source', f'Citation {cn} has more than one bibliography entry.', n + 1, lines[n])
+                collisions.append(dict(kind='source_id_collision', id_source=source['id_source'],
+                                       reports=[legacy_identity], message=f'Citation {cn} is defined more than once.'))
+                continue
+            source['report_provenance'] = {**deepcopy(report), 'citation_number': cn}
+            source_map[cn] = source
 
-    # --- Phase 4: Body parsing ---
-    # Find first ## heading (skip everything before it: summary + JSX)
-    body_start = None
-    body_end = sources_start if sources_start else len(lines)
-    for i in range(frontmatter_end, len(lines)):
-        s = lines[i].strip()
-        if s.startswith('## ') and s != '## Sources':
-            body_start = i
-            break
+    items, section, subsection, sections = [], '', '', set()
+    occurrence = 0
 
-    empty_result = {
-        'items': [], 'sources': list(source_map.values()),
-        'title': title, 'report_date': report_date, 'filepath': filepath,
-        'collisions': collisions,
-        'stats': {
-            'items': 0,
-            'sources': len(source_map),
-            'sections': 0,
-            'source_id_collisions': len(collisions),
-        }
-    }
-    if body_start is None:
-        return empty_result
+    def add_passage(text, numbers, line):
+        nonlocal occurrence
+        occurrence += 1
+        key = f'{identity}\0{section}\0{subsection}\0{occurrence}\0{text}'
+        group_id = 'grp_' + hashlib.sha256(key.encode()).hexdigest()[:24]
+        for cn in dict.fromkeys(numbers):
+            if cn not in source_map:
+                diagnose('missing_source', f'Citation [{cn}] has no bibliography entry.', line, text + f' [{cn}]')
+            item = _make_item(text, cn, section or 'Introduction', subsection, title, '', source_map)
+            item['id_item'] = str(uuid.uuid5(uuid.NAMESPACE_URL, key + f'\0{cn}'))
+            item['report_provenance'] = {**deepcopy(report), 'citation_number': cn, 'line': line}
+            if len(set(numbers)) > 1:
+                item['related_facts'] = [group_id]
+                item['relates_to_other_facts'] = True
+            items.append(item)
 
-    # State
-    all_items = []
-    current_section = ''
-    current_subsection = ''
-    section_count = 0
-    para_lines = []
-    table_lead_in = ''
-
-    # Table state
-    in_table = False
-    t_header = ''
-    t_sep = ''
-    t_rows = []
-
-    def flush_para():
-        nonlocal para_lines, table_lead_in
-        if not para_lines:
+    def extract(text, line, table=False):
+        if not section:
+            diagnose('opening_content', 'Opening content was extracted under Introduction; move it under a ## heading.',
+                     line, text, 'warning')
+        # A conservative boundary: these structures need review, not execution or
+        # guesses about which data/props constitute evidence.
+        if (re.search(r'<(?!https?://)(?:/?[A-Za-z]|!)', text) or
+                re.search(r'(^|\n)\s*(?:```|~~~|import\s|export\s)', text) or
+                re.search(r'[{}]', text)):
+            diagnose('unsupported_structure', 'MDX/HTML, expressions and code blocks are not extracted. '
+                     'Keep this original block and provide its evidence in cited prose.', line, text)
             return
-        text = ' '.join(para_lines).strip()
-        para_lines = []
-        if not text:
+        matches = list(CITE_PATTERN.finditer(text))
+        brackets = re.findall(r'\[[^\]\n]*\]', text)
+        if any(not CITE_PATTERN.fullmatch(value) for value in brackets) or re.search(r'\]\s*\[', text):
+            diagnose('unsupported_citation', 'Use grouped numeric citations such as [1, 2]; review this entire passage.', line, text)
             return
-        # Store as potential table lead-in (stripped of cites for context)
-        table_lead_in = text
-        # Create items from citation-delimited segments
-        all_items.extend(_items_from_text(text, current_section, current_subsection,
-                                          title, report_date, source_map))
-
-    def flush_table():
-        nonlocal in_table, t_header, t_sep, t_rows
-        if t_rows:
-            all_items.extend(_process_table(
-                table_lead_in, t_header, t_sep, t_rows,
-                current_section, current_subsection,
-                title, report_date, source_map
-            ))
-        in_table = False
-        t_header = ''
-        t_sep = ''
-        t_rows = []
-
-    i = body_start
-    while i < body_end:
-        line = lines[i]
-        stripped = line.strip()
-
-        # Empty line: flush current accumulator
-        if not stripped:
-            if in_table:
-                flush_table()
+        if not matches:
+            diagnose('uncited_text', 'This passage has no supported citation and was not extracted.', line, text)
+            return
+        if table:
+            numbers = [int(n.strip()) for match in matches for n in match[1].split(',')]
+            add_passage(CITE_PATTERN.sub('', text).strip(), numbers, line)
+            return
+        prev = 0
+        for match in matches:
+            segment = text[prev:match.start()].strip()
+            if segment:
+                add_passage(segment, [int(n.strip()) for n in match[1].split(',')], line)
             else:
-                flush_para()
-            i += 1
-            continue
+                diagnose('empty_citation', 'Citation has no preceding passage.', line, text)
+            prev = match.end()
+        if text[prev:].strip():
+            diagnose('trailing_text', 'Text after the final citation was not extracted; put punctuation and evidence before the citation.', line, text)
 
-        # Horizontal rule
-        if stripped == '---':
-            flush_para()
-            if in_table:
-                flush_table()
-            i += 1
-            continue
+    paragraph, paragraph_line = [], start + 1
 
-        # JSX components (skip)
-        if JSX_LINE.match(stripped) and ('/' in stripped or '</' in stripped):
-            flush_para()
-            i += 1
-            continue
+    def flush():
+        if paragraph:
+            extract('\n'.join(paragraph), paragraph_line)
+            paragraph.clear()
 
-        # Section headers
-        if stripped.startswith('### '):
-            flush_para()
-            if in_table:
-                flush_table()
-            current_subsection = stripped[4:].strip()
-            i += 1
+    n = start
+    saw_title = False
+    while n < body_end:
+        text = lines[n].strip()
+        if not text or text == '---':
+            flush()
+            n += 1
             continue
-
-        if stripped.startswith('## '):
-            flush_para()
-            if in_table:
-                flush_table()
-            current_section = stripped[3:].strip()
-            current_subsection = ''
-            section_count += 1
-            i += 1
+        if text.startswith(('```', '~~~')):
+            flush()
+            fence, first = text[:3], n
+            n += 1
+            while n < body_end and not lines[n].strip().startswith(fence):
+                n += 1
+            n = min(n + 1, body_end)
+            diagnose('unsupported_structure', 'Code fence not extracted; retain evidence in cited prose.', first + 1, '\n'.join(lines[first:n]))
             continue
-
-        # Table handling
-        if stripped.startswith('|'):
-            if not in_table:
-                flush_para()
-                in_table = True
-                t_header = stripped
-                # Check next line for separator
-                if i + 1 < body_end and TABLE_SEPARATOR.match(lines[i + 1].strip()):
-                    t_sep = lines[i + 1].strip()
-                    i += 2
-                    continue
-                i += 1
-                continue
-            elif TABLE_SEPARATOR.match(stripped):
-                t_sep = stripped
-                i += 1
-                continue
+        heading = re.match(r'^(#+)\s+(.*)$', text)
+        if heading:
+            flush()
+            level = len(heading[1])
+            if level == 1:
+                if saw_title or section:
+                    diagnose('unsupported_heading', 'Use one # report title; use ## for sections.', n + 1, lines[n])
+                saw_title = True
+            elif level == 2:
+                section, subsection = heading[2], ''
+                sections.add(section)
+            elif level == 3:
+                subsection = heading[2]
+            elif level > 3:
+                diagnose('unsupported_heading', 'Use headings no deeper than ###.', n + 1, lines[n])
+            n += 1
+            continue
+        if text.startswith('|'):
+            flush()
+            first = n
+            block = []
+            while n < body_end and lines[n].strip().startswith('|'):
+                block.append(lines[n].strip())
+                n += 1
+            if len(block) < 3 or not TABLE_SEPARATOR.fullmatch(block[1]):
+                diagnose('unsupported_table', 'Table must have a header, separator and individually cited data rows.', first + 1, '\n'.join(block))
+            elif CITE_PATTERN.search(block[0]):
+                diagnose('unsupported_table', 'Citations in a table header are ambiguous; put evidence and citations in data rows.', first + 1, '\n'.join(block))
             else:
-                t_rows.append(stripped)
-                i += 1
-                continue
-
-        # Blockquote
-        if stripped.startswith('> '):
-            flush_para()
-            if in_table:
-                flush_table()
-            bq_text = stripped[2:].strip()
-            all_items.extend(_items_from_text(bq_text, current_section, current_subsection,
-                                              title, report_date, source_map))
-            i += 1
+                for offset, row in enumerate(block[2:], 2):
+                    # Header citations cannot establish evidence for an uncited row.
+                    if not CITE_PATTERN.search(row):
+                        diagnose('uncited_text', 'Table row has no citation; citations from other rows are not inherited.', first + offset + 1, row)
+                    else:
+                        extract('\n'.join([block[0], block[1], row]), first + offset + 1, table=True)
             continue
-
-        # Regular paragraph line
-        if in_table:
-            flush_table()
-        para_lines.append(stripped)
-        i += 1
-
-    # Final flush
-    flush_para()
-    if in_table:
-        flush_table()
-
-    return {
-        'items': all_items,
-        'sources': list(source_map.values()),
-        'title': title,
-        'report_date': report_date,
-        'filepath': filepath,
-        'collisions': collisions,
-        'stats': {
-            'items': len(all_items),
-            'sources': len(source_map),
-            'sections': section_count,
-            'source_id_collisions': len(collisions),
-        }
-    }
+        # Lists and blockquotes retain their textual markers and source links.
+        if re.match(r'^(?:[-*+] |\d+\. |> )', text):
+            flush()
+        if not paragraph:
+            paragraph_line = n + 1
+        paragraph.append(lines[n])
+        n += 1
+    flush()
+    if not items:
+        diagnose('no_passages', 'No cited research passages were extracted.')
+    can_import = not any(d['severity'] == 'error' for d in diagnostics) and not collisions
+    for record in items + list(source_map.values()):
+        record['report_provenance']['import_ready'] = can_import
+        record['report_provenance']['diagnostics'] = deepcopy(diagnostics)
+    return dict(items=items, sources=list(source_map.values()), title=title,
+                report_date=metadata.get('publishedOn') or '', filepath=filepath,
+                report=report, diagnostics=diagnostics, can_import=can_import, collisions=collisions,
+                stats=dict(items=len(items), sources=len(source_map), sections=len(sections),
+                           source_id_collisions=len(collisions)))
 
 
 def parse_mdx_folder(folderpath: str) -> dict:
-    """Parse all .mdx files in a folder.
-
-    Returns combined results with per-file stats.
-    """
-    all_items = []
-    all_sources = []
-    file_results = []
-    collision_by_id = {}
-    source_report_by_id = {}
-
-    mdx_files = sorted([
-        f for f in os.listdir(folderpath)
-        if f.lower().endswith('.mdx')
-    ])
-
-    for filename in mdx_files:
-        filepath = os.path.join(folderpath, filename)
-        report_identity = os.path.relpath(filepath, folderpath)
-        report_identity = _normalize_report_identity(report_identity)
-        result = parse_mdx_file(filepath, report_identity=report_identity)
-        all_items.extend(result['items'])
-        all_sources.extend(result['sources'])
-
-        for collision in result.get('collisions', []):
-            source_id = collision.get('id_source', '')
-            if source_id:
-                collision_by_id[source_id] = collision
-
+    """Parse top-level MDX files, retaining each report's metadata and diagnostics."""
+    items, sources, files, diagnostics = [], [], [], []
+    collisions, source_reports, report_ids = {}, {}, {}
+    for filename in sorted(f for f in os.listdir(folderpath) if f.lower().endswith('.mdx')):
+        result = parse_mdx_file(os.path.join(folderpath, filename), report_identity=filename)
+        items.extend(result['items'])
+        sources.extend(result['sources'])
+        diagnostics.extend(result['diagnostics'])
+        report_id = result['report']['report_id']
+        if report_id in report_ids:
+            diagnostics.append(dict(code='duplicate_report_id', severity='error', line=1, filename=filename,
+                                    excerpt=report_id, message=f'Report identity also occurs in {report_ids[report_id]}; select only one edition.'))
+        report_ids[report_id] = filename
+        for collision in result['collisions']:
+            collisions[collision['id_source']] = collision
         for source in result['sources']:
-            source_id = source.get('id_source', '')
-            if not source_id:
-                continue
-            previous_report = source_report_by_id.get(source_id)
-            if previous_report is None:
-                source_report_by_id[source_id] = report_identity
-                continue
-
-            collision = collision_by_id.setdefault(source_id, {
-                'kind': 'source_id_collision',
-                'id_source': source_id,
-                'reports': [previous_report],
-                'message': f"Source ID {source_id} was generated by multiple reports.",
-            })
-            if report_identity not in collision['reports']:
-                collision['reports'].append(report_identity)
-
-        file_results.append({
-            'filename': filename,
-            'title': result['title'],
-            'stats': result['stats']
-        })
-
-    return {
-        'items': all_items,
-        'sources': all_sources,
-        'files': file_results,
-        'collisions': list(collision_by_id.values()),
-        'stats': {
-            'total_items': len(all_items),
-            'total_sources': len(all_sources),
-            'total_files': len(mdx_files),
-            'source_id_collisions': len(collision_by_id),
-        }
-    }
+            sid = source['id_source']
+            if sid in source_reports:
+                collision = collisions.setdefault(sid, dict(kind='source_id_collision', id_source=sid,
+                    reports=[source_reports[sid]], message=f'Source ID {sid} occurs in multiple reports.'))
+                if filename not in collision['reports']:
+                    collision['reports'].append(filename)
+            else:
+                source_reports[sid] = filename
+        files.append(dict(filename=filename, title=result['title'], stats=result['stats'], report=result['report'],
+                          diagnostics=result['diagnostics'], can_import=result['can_import']))
+    if not files:
+        diagnostics.append(dict(code='no_reports', severity='error', line=1, filename='', excerpt='',
+                                message='No .mdx reports found directly inside this folder.'))
+    return dict(items=items, sources=sources, files=files, diagnostics=diagnostics,
+                can_import=not collisions and not any(d['severity'] == 'error' for d in diagnostics),
+                collisions=list(collisions.values()), stats=dict(total_items=len(items), total_sources=len(sources),
+                    total_files=len(files), source_id_collisions=len(collisions)))
 
 
 # --- CLI for testing ---
@@ -583,3 +455,7 @@ if __name__ == '__main__':
         print(f"    Section: {it['category_part_name']} / {it['subpart_name']}")
         print(f"    Related: {it['related_facts']}")
         print()
+
+    for diagnostic in result["diagnostics"]:
+        print(f"{diagnostic['severity'].upper()} {diagnostic['filename']}:{diagnostic['line']} {diagnostic['message']}")
+    sys.exit(0 if result["can_import"] else 2)

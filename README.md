@@ -48,6 +48,8 @@ python start_scribity.py
 
 On Windows, activate the environment with `.venv\Scripts\activate` and run `python start_scribity.py`. The included `scribity.command` and `scribity.bat` launchers are also available for macOS and Windows.
 
+Once dependencies are installed in `.venv`, `scribity.bat` uses `.venv\Scripts\python.exe` automatically; activation is not required when double-clicking it. `start_scribity.py` also prefers the project's `.venv` interpreter on Windows, macOS, and Linux.
+
 Scribity opens at [http://localhost:8000](http://localhost:8000). To explore without personal data, use the file controls to open:
 
 - Items: `examples/research-items.json`
@@ -161,3 +163,30 @@ create a fresh one. Saved files remain available after a preview expires and can
 be opened through the ordinary Items/Sources controls. Publication uses atomic
 no-overwrite hard links to staged files; a filesystem without hard-link support
 will fail safely, in which case save to a local folder that supports them.
+
+### Import metadata-bearing research reports
+
+Use **Parser** to preview an MDX report or a folder. Report metadata is preserved
+on imported items and sources, including through Save As and episode-project
+extraction. Publication dates no longer populate historical event dates.
+
+The preview shows explicit errors for missing citations and content it cannot
+extract; these errors block saving. Already imported report IDs block duplicate
+appends. [The report format guide](docs/DRR_IMPORT_FORMAT.md) includes a small
+sample report, expected output, supported formatting, and current limitations.
+After updating, install `requirements.txt` and restart Scribity for the new
+importer to load. Existing research files are not migrated automatically.
+
+### Undo and redo
+
+Use the visible **Undo** and **Redo** buttons, or **⌘Z / Ctrl+Z** to undo and
+**⌘Shift+Z / Ctrl+Shift+Z** to redo. **Ctrl+Y** also redoes a change.
+While typing in a text field, the browser retains its own text undo behavior;
+click outside the field or use the toolbar for document-level undo.
+
+The Sources view uses its own source history; other views use item history.
+Each retains up to 30 changes, including delayed Inspector, Draft/Render, and
+example-note edits. Undo cancels pending edit timers before restoring the saved
+snapshot. A new edit clears redo. Opening another document clears that
+document's history; Save As preserves it. Reloading clears both histories.
+Restored states are saved through the ordinary document save queue.

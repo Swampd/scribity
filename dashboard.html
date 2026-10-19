@@ -581,12 +581,114 @@
 
         // Fields rendered by other UI sections (Primary Quote, Linked Source, RuleManager, ExampleManager)
         const RENDERED_ELSEWHERE = new Set([
-            'id_item', 'id_source', 'quote_original',
+            'id_item', 'id_source', 'quote_original', 'report_provenance',
             'rule_name', 'rule_number', 'subpart_name', 'subpart_number',
             'relevance_tags',
             ...EXAMPLE_EXCLUDED_KEYS,
             ...ADDITIONAL_INFO_FIELDS
         ]);
+
+        const SourcePicker = ({ sources, selectedId, onSelect }) => {
+            const [query, setQuery] = useState('');
+            const [open, setOpen] = useState(false);
+            const [activeId, setActiveId] = useState(null);
+            const listRef = useRef(null);
+            const sourceLabel = source => source ? (source.short_cite || source.title || source.id_source) : '';
+            const currentSource = sources.find(source => source.id_source === selectedId);
+            const filtered = sources.filter(source =>
+                (source.short_cite || '').toLowerCase().includes(query.toLowerCase()) ||
+                (source.title || '').toLowerCase().includes(query.toLowerCase())
+            );
+            const activeIndex = filtered.findIndex(source => source.id_source === activeId);
+            const close = () => { setOpen(false); setQuery(''); setActiveId(null); };
+            const select = source => { onSelect(source.id_source); close(); };
+
+            // Undo or another document edit must not leave an old suggestion active.
+            useEffect(() => { close(); }, [selectedId]);
+            useEffect(() => {
+                if (open && activeIndex >= 0) {
+                    listRef.current?.children[activeIndex]?.scrollIntoView({ block: 'nearest' });
+                }
+            }, [open, activeIndex]);
+
+            const handleKeyDown = event => {
+                if (event.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setOpen(true);
+                    if (!filtered.length) return;
+                    const next = activeIndex < 0
+                        ? (event.key === 'ArrowDown' ? 0 : filtered.length - 1)
+                        : Math.max(0, Math.min(filtered.length - 1, activeIndex + (event.key === 'ArrowDown' ? 1 : -1)));
+                    setActiveId(filtered[next].id_source);
+                } else if (event.key === 'Enter' && open && activeIndex >= 0) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    select(filtered[activeIndex]);
+                } else if (event.key === 'Escape' && open) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    close();
+                } else if (event.key === 'Tab') {
+                    close();
+                }
+            };
+
+            return (
+                <div className="flex items-center gap-2">
+                    <label htmlFor="source-connect-search" className="text-xs text-slate-400 uppercase font-bold shrink-0">Connect source:</label>
+                    <div className="relative flex items-center gap-1">
+                        <input
+                            id="source-connect-search"
+                            type="text" role="combobox" autoComplete="off"
+                            aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={open}
+                            aria-controls={open ? 'source-connect-options' : undefined}
+                            aria-activedescendant={open && activeIndex >= 0 ? `source-connect-option-${activeIndex}` : undefined}
+                            aria-describedby="source-connect-help"
+                            className="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded px-2 py-1 w-[240px] focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500 outline-none"
+                            placeholder="Search sources"
+                            value={open ? query : sourceLabel(currentSource)}
+                            onFocus={() => { setOpen(true); setQuery(''); setActiveId(null); }}
+                            onClick={() => { if (!open) { setOpen(true); setQuery(''); setActiveId(null); } }}
+                            onChange={event => { setQuery(event.target.value); setActiveId(null); setOpen(true); }}
+                            onKeyDown={handleKeyDown}
+                            onBlur={close}
+                        />
+                        <span id="source-connect-help" className="sr-only">Type to search. Use Up and Down arrows to choose a result, Enter to connect, or Escape to cancel.</span>
+                        {selectedId && (
+                            <button type="button" onClick={() => { onSelect(''); close(); }} aria-label="Unlink source"
+                                className="p-1 text-slate-400 hover:text-red-400 focus-visible:ring-2 focus-visible:ring-emerald-500 rounded transition-colors"
+                                title="Unlink source">
+                                <Icon name="x" size={12} />
+                            </button>
+                        )}
+                        {open && (
+                            <div className="absolute left-0 top-full mt-1 z-50 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl shadow-black/50 w-[320px]">
+                                <div ref={listRef} id="source-connect-options" role="listbox" aria-label="Sources"
+                                    className="max-h-[240px] overflow-y-auto">
+                                    {filtered.map((source, index) => (
+                                        <button type="button" role="option" tabIndex={-1} key={source.id_source}
+                                            id={`source-connect-option-${index}`} aria-selected={index === activeIndex}
+                                            // Keep DOM focus in the combobox; click handles all selection activation.
+                                            onMouseDown={event => event.preventDefault()}
+                                            onClick={() => select(source)}
+                                            className={`w-full text-left px-3 py-2 text-xs hover:bg-emerald-800 transition-colors flex items-center gap-2 ${index === activeIndex ? 'bg-emerald-800 text-white outline outline-2 -outline-offset-2 outline-emerald-400' : 'text-slate-200'}`}>
+                                            <Icon name="database" size={10} className="text-emerald-400 shrink-0" />
+                                            <span className="truncate">{sourceLabel(source)}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                                <div role="status" aria-live="polite" aria-atomic="true"
+                                    className={filtered.length ? 'sr-only' : 'px-3 py-2 text-xs text-slate-300'}>
+                                    {filtered.length ? `${filtered.length} sources available.` : 'No sources match your search.'}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
 
         // --- RULE EDITOR COMPONENTS ---
 
@@ -817,7 +919,6 @@
             const hasExampleFlag = item.contains_example;
             const [editingIdx, setEditingIdx] = useState(null);
             const [editingNoteIdx, setEditingNoteIdx] = useState(null);
-            const [localNotes, setLocalNotes] = useState({});
 
             const handleDelete = (idx) => {
                 const texts = examples.map(e => e.text);
@@ -851,16 +952,7 @@
             const handleNoteEdit = (idx, newNote) => {
                 const noteKey = EXAMPLE_NOTE_FIELDS[idx];
                 const newItem = { ...item, [noteKey]: newNote };
-                // Immediate local update for responsive UI
-                setLocalNotes(prev => ({ ...prev, [noteKey]: newNote }));
-                onLocalChange(newItem);
-                // Debounced save to server (600ms)
-                if (noteSaveTimer.current) clearTimeout(noteSaveTimer.current);
-                noteSaveTimer.current = setTimeout(() => {
-                    onSave(newItem);
-                    setLocalNotes(prev => { const n = { ...prev }; delete n[noteKey]; return n; });
-                    noteSaveTimer.current = null;
-                }, 600);
+                onLocalChange(newItem, noteSaveTimer);
             };
 
             return (
@@ -955,7 +1047,7 @@
                                     <div className="mt-1.5 ml-8 border-l-2 border-amber-900/30 pl-3">
                                         <textarea
                                             className="w-full text-xs text-slate-400 bg-transparent border-none resize-none focus:outline-none focus:text-slate-200 placeholder-slate-600 overflow-hidden"
-                                            value={localNotes.hasOwnProperty(ex.noteKey) ? localNotes[ex.noteKey] : ex.note}
+                                            value={ex.note}
                                             placeholder={labels.exampleNoteHint || 'Add a note...'}
                                             onChange={(e) => handleNoteEdit(idx, e.target.value)}
                                             onFocus={(e) => { setEditingNoteIdx(idx); autoResizeTextarea(e); }}
@@ -993,6 +1085,57 @@
                 </div>
             );
         };
+
+        // --- DRR IMPORT REVIEW ---
+        const getDrrImportReview = (result, existingRecords = []) => {
+            const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
+            const existingIds = new Set(existingRecords.map(record => record.report_provenance?.report_id).filter(Boolean));
+            const incomingIds = new Set([...(result.items || []), ...(result.sources || [])]
+                .map(record => record.report_provenance?.report_id).filter(Boolean));
+            const repeatedReports = [...incomingIds].filter(id => existingIds.has(id));
+            const canSave = result.can_import === true && !(result.collisions || []).length
+                && !diagnostics.some(diagnostic => diagnostic.severity === 'error');
+            return { diagnostics, repeatedReports, canSave, canAppend: canSave && repeatedReports.length === 0 };
+        };
+
+        const ReportMetadata = ({ report }) => {
+            if (!report || typeof report !== 'object') return null;
+            const metadata = report.metadata || {};
+            return (
+                <details className="col-span-12 bg-slate-900 border border-slate-600 rounded-lg p-4 mb-4 text-slate-200">
+                    <summary className="cursor-pointer font-bold">Report metadata — {report.title || report.report_id}</summary>
+                    <dl className="mt-3 text-sm space-y-2 break-words">
+                        <div><dt className="inline font-bold">Report ID: </dt><dd className="inline">{report.report_id}</dd></div>
+                        <div><dt className="inline font-bold">Published: </dt><dd className="inline">{metadata.publishedOn || 'Unknown / unpublished'}</dd></div>
+                        <div><dt className="inline font-bold">Updated: </dt><dd className="inline">{metadata.updatedOn || 'Unknown'}</dd></div>
+                    </dl>
+                    <p className="text-sm text-slate-300 my-3">These are report dates. Historical event dates are recorded separately on each item. This imported metadata is retained when you save or create a project.</p>
+                    <pre className="text-xs whitespace-pre-wrap break-words max-h-64 overflow-auto bg-slate-950 p-3 rounded">{JSON.stringify(metadata, null, 2)}</pre>
+                </details>
+            );
+        };
+
+        const DrrImportReview = ({ result, review }) => (
+            <div className="mb-6 space-y-3">
+                {!review.canSave && <p role="alert" className="bg-red-950 border border-red-500 text-red-100 p-4 rounded-lg">
+                    Import needs attention. Saving and appending are disabled until the report errors below are resolved. The original report has not been changed.
+                    {result.can_import === undefined && ' Restart Scribity to load the updated importer, then select the report again.'}
+                </p>}
+                {review.repeatedReports.length > 0 && <p role="alert" className="bg-amber-950 border border-amber-500 text-amber-100 p-4 rounded-lg">
+                    Already in this project: {review.repeatedReports.join(', ')}. Append will not merge or replace your edits. You can save this edition to a new file.
+                </p>}
+                {review.diagnostics.length > 0 && <div className="space-y-3 max-h-96 overflow-y-auto" aria-label="Report import diagnostics">
+                    {review.diagnostics.map((diagnostic, index) => (
+                        <div key={index} className={`border rounded-lg p-3 ${diagnostic.severity === 'error' ? 'border-red-600 text-red-100 bg-red-950' : 'border-amber-600 text-amber-100 bg-amber-950'}`}>
+                            <p className="font-bold text-sm">{diagnostic.severity === 'error' ? 'Error' : 'Review'} — {`${diagnostic.filename || 'Report'}:${diagnostic.line || 1}`}</p>
+                            <p className="text-sm mt-1">{diagnostic.message}</p>
+                            {diagnostic.excerpt && <pre className="text-xs whitespace-pre-wrap break-words mt-2 max-h-48 overflow-auto">{diagnostic.excerpt}</pre>}
+                        </div>
+                    ))}
+                </div>}
+                {(result.files || [{ report: result.report }]).map((file, index) => <ReportMetadata key={index} report={file.report} />)}
+            </div>
+        );
 
         const AdditionalInfoManager = ({ item, onChange }) => {
             const [isOpen, setIsOpen] = useState(false);
@@ -1196,6 +1339,10 @@
             // E016: Undo/Redo stacks
             const undoStack = useRef([]);
             const redoStack = useRef([]);
+            const sourceUndoStack = useRef([]);
+            const sourceRedoStack = useRef([]);
+            const sourceUndoSnapshot = useRef(null);
+            const sourcesHistoryDocumentToken = useRef(null);
             const itemsHistoryDocumentToken = useRef(null);
             const UNDO_LIMIT = 30;
 
@@ -1301,12 +1448,6 @@
             const [projectItemsPath, setProjectItemsPath] = useState('');
             const [projectSourcesPath, setProjectSourcesPath] = useState('');
 
-            // Source search combobox state
-            const [srcQuery, setSrcQuery] = useState('');
-            const [srcOpen, setSrcOpen] = useState(false);
-            // QoL #5: Reset combobox when navigating between items
-            useEffect(() => { setSrcQuery(''); setSrcOpen(false); }, [selectedItemId]);
-
             // File tracking
             const [itemsFilename, setItemsFilename] = useState('No file');
             const [sourcesFilename, setSourcesFilename] = useState('No file');
@@ -1377,6 +1518,8 @@
 
             const discardStaleItemHistory = () => {
                 if (itemsHistoryDocumentToken.current !== itemsDocumentRef.current.token) {
+                    [inspectorSaveTimer, draftSaveTimer, exampleNoteSaveTimer].forEach(clearTimerRef);
+                    inspectorUndoSnapshot.current = null;
                     undoStack.current = [];
                     redoStack.current = [];
                     itemsHistoryDocumentToken.current = itemsDocumentRef.current.token;
@@ -1385,14 +1528,16 @@
                 return false;
             };
 
-            const resetSourcesDocumentSession = () => {
+            const resetSourcesDocumentSession = (document) => {
+                sourceUndoStack.current = [];
+                sourceRedoStack.current = [];
+                sourceUndoSnapshot.current = null;
+                sourcesHistoryDocumentToken.current = document.token;
                 clearTimerRef(sourceSaveTimer);
                 resetSaveQueueForActivation(sourcesSaveQueue);
                 clearDeleteUndoFor('sources');
                 setDeleteConfirm(null);
                 setSelectedSourceId(null);
-                setSrcQuery('');
-                setSrcOpen(false);
             };
 
             const activateItemsDocument = ({ rawItems, filename, document, mode = null }) => {
@@ -1409,7 +1554,7 @@
 
             const activateSourcesDocument = ({ sources: nextSources, filename, document }) => {
                 applyDocumentState('sources', document);
-                resetSourcesDocumentSession();
+                resetSourcesDocumentSession(document);
                 sourcesRef.current = nextSources;
                 setSources(nextSources);
                 setSourcesReady(true);
@@ -1638,7 +1783,7 @@
                     return false;
                 }
                 const mode = schemaModeRef.current;
-                const originDocument = { ...itemsDocument };
+                const originDocument = { ...itemsDocumentRef.current };
                 enqueueSave(itemsSaveQueue, {
                     endpoint: 'save_items',
                     originDocument,
@@ -1662,7 +1807,7 @@
                     setStatus('Save Blocked');
                     return false;
                 }
-                const originDocument = { ...sourcesDocument };
+                const originDocument = { ...sourcesDocumentRef.current };
                 enqueueSave(sourcesSaveQueue, {
                     endpoint: 'save_sources',
                     originDocument,
@@ -1682,29 +1827,12 @@
 
             const flushPendingDocumentSaves = async (document) => {
                 if (document === 'items') {
-                    const timers = [inspectorSaveTimer, draftSaveTimer, exampleNoteSaveTimer];
-                    const hadPendingTimer = timers.some(timer => timer.current);
-                    timers.forEach(timer => {
-                        if (timer.current) clearTimeout(timer.current);
-                        timer.current = null;
-                    });
-                    if (hadPendingTimer) {
-                        if (inspectorUndoSnapshot.current) {
-                            undoStack.current.push(inspectorUndoSnapshot.current);
-                            if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
-                            redoStack.current = [];
-                            inspectorUndoSnapshot.current = null;
-                        }
-                        queueItemsSave(itemsRef.current, 'Saved before switching');
-                    }
+                    if (commitPendingItemEdit()) queueItemsSave(itemsRef.current, 'Saved before switching');
                     await waitForSaveQueue(itemsSaveQueue);
                     return;
                 }
 
-                const hadPendingTimer = Boolean(sourceSaveTimer.current);
-                if (sourceSaveTimer.current) clearTimeout(sourceSaveTimer.current);
-                sourceSaveTimer.current = null;
-                if (hadPendingTimer) queueSourcesSave(sourcesRef.current, 'Saved before switching');
+                if (commitPendingSourceEdit()) queueSourcesSave(sourcesRef.current, 'Saved before switching');
                 await waitForSaveQueue(sourcesSaveQueue);
             };
 
@@ -1715,16 +1843,62 @@
                 ]);
             };
 
+            // --- DOCUMENT HISTORY ---
+            const rememberChange = (stack, redo, snapshot) => {
+                stack.current.push(snapshot);
+                if (stack.current.length > UNDO_LIMIT) stack.current.shift();
+                redo.current = [];
+            };
+
+            const commitPendingItemEdit = () => {
+                [inspectorSaveTimer, draftSaveTimer, exampleNoteSaveTimer].forEach(clearTimerRef);
+                if (!inspectorUndoSnapshot.current) return false;
+                rememberChange(undoStack, redoStack, inspectorUndoSnapshot.current);
+                inspectorUndoSnapshot.current = null;
+                return true;
+            };
+
+            const commitPendingSourceEdit = () => {
+                clearTimerRef(sourceSaveTimer);
+                if (!sourceUndoSnapshot.current) return false;
+                rememberChange(sourceUndoStack, sourceRedoStack, sourceUndoSnapshot.current);
+                sourceUndoSnapshot.current = null;
+                return true;
+            };
+
+            const stageItemEdit = (newItems, timer = inspectorSaveTimer) => {
+                if (!itemsReady) return;
+                if (!inspectorUndoSnapshot.current) inspectorUndoSnapshot.current = itemsRef.current;
+                redoStack.current = [];
+                itemsRef.current = newItems;
+                setItems(newItems);
+                clearTimerRef(timer);
+                timer.current = setTimeout(() => {
+                    if (commitPendingItemEdit()) queueItemsSave(itemsRef.current);
+                }, 600);
+            };
+
+            const stageSourceEdit = (newSources) => {
+                if (!sourcesReady) return;
+                if (!sourceUndoSnapshot.current) sourceUndoSnapshot.current = sourcesRef.current;
+                sourceRedoStack.current = [];
+                sourcesRef.current = newSources;
+                setSources(newSources);
+                clearTimerRef(sourceSaveTimer);
+                sourceSaveTimer.current = setTimeout(() => {
+                    if (commitPendingSourceEdit()) queueSourcesSave(sourcesRef.current);
+                }, 600);
+            };
+
             const saveItems = (newItems) => {
                 if (!itemsReady) {
                     showErrorToast('Create or open a valid items document before making changes.');
                     setStatus('Save Blocked');
                     return false;
                 }
-                // E016: Push current state to undo stack before saving
-                undoStack.current.push([...itemsRef.current]);
-                if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
-                redoStack.current = []; // Clear redo on new action
+                commitPendingItemEdit();
+                rememberChange(undoStack, redoStack, itemsRef.current);
+                itemsRef.current = newItems;
                 setItems(newItems);
                 queueItemsSave(newItems);
                 return true;
@@ -1736,72 +1910,70 @@
                     setStatus('Save Blocked');
                     return false;
                 }
+                commitPendingSourceEdit();
+                rememberChange(sourceUndoStack, sourceRedoStack, sourcesRef.current);
+                sourcesRef.current = newSources;
                 setSources(newSources);
                 queueSourcesSave(newSources);
                 return true;
             };
 
-            useEffect(() => { fetchData(); }, []);
+            const restoreHistory = (direction) => {
+                if (projectModal || newDocModal || deleteConfirm) return;
+                const isSource = view === 'sources';
+                if (isSource ? !sourcesReady : !itemsReady) return;
+                if (isSource && sourcesHistoryDocumentToken.current !== sourcesDocumentRef.current.token) {
+                    sourceUndoStack.current = [];
+                    sourceRedoStack.current = [];
+                    sourceUndoSnapshot.current = null;
+                    clearTimerRef(sourceSaveTimer);
+                    sourcesHistoryDocumentToken.current = sourcesDocumentRef.current.token;
+                    setStatus('History cleared for opened sources document');
+                    return;
+                }
+                if (!isSource && discardStaleItemHistory()) {
+                    setStatus('History cleared for opened items document');
+                    return;
+                }
+                // Commit the pre-typing snapshot and cancel every delayed callback
+                // before restoring, so a timer cannot overwrite the undone state.
+                if (isSource) commitPendingSourceEdit();
+                else commitPendingItemEdit();
+                const undo = isSource ? sourceUndoStack : undoStack;
+                const redo = isSource ? sourceRedoStack : redoStack;
+                const from = direction === 'undo' ? undo : redo;
+                const to = direction === 'undo' ? redo : undo;
+                if (!from.current.length) return;
+                const ref = isSource ? sourcesRef : itemsRef;
+                to.current.push(ref.current);
+                if (to.current.length > UNDO_LIMIT) to.current.shift();
+                const restored = from.current.pop();
+                ref.current = restored;
+                clearDeleteUndoFor(isSource ? 'sources' : 'items');
+                if (isSource) {
+                    setSources(restored);
+                    queueSourcesSave(restored, `Saved (${direction})`);
+                } else {
+                    setItems(restored);
+                    queueItemsSave(restored, `Saved (${direction})`);
+                }
+            };
 
-            // E008: Arrow key shortcuts for Prev/Next in inspector
-            // E016: Ctrl+Z / Ctrl+Shift+Z undo/redo
-            useEffect(() => {
-                const handler = (e) => {
-                    if (projectModal) return;
-                    // E016: Ctrl+Z undo
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-                        const tag = document.activeElement?.tagName?.toLowerCase();
-                        if (tag === 'input' || tag === 'textarea') return; // Let browser handle text undo
-                        e.preventDefault();
-                        if (discardStaleItemHistory()) {
-                            setStatus('Undo history cleared for opened document');
-                            return;
-                        }
-                        if (undoStack.current.length === 0) return;
-                        const prev = undoStack.current.pop();
-                        redoStack.current.push([...itemsRef.current]);
-                        setItems(prev);
-                        setStatus('Undone');
-                        // Also save the restored state to server
-                        queueItemsSave(prev, 'Saved (undo)');
-                        return;
-                    }
-                    // E016: Ctrl+Shift+Z redo
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && e.shiftKey) {
-                        const tag = document.activeElement?.tagName?.toLowerCase();
-                        if (tag === 'input' || tag === 'textarea') return;
-                        e.preventDefault();
-                        if (discardStaleItemHistory()) {
-                            setStatus('Redo history cleared for opened document');
-                            return;
-                        }
-                        if (redoStack.current.length === 0) return;
-                        const next = redoStack.current.pop();
-                        undoStack.current.push([...itemsRef.current]);
-                        setItems(next);
-                        setStatus('Redone');
-                        queueItemsSave(next, 'Saved (redo)');
-                        return;
-                    }
-                    // E008: Arrow keys for inspector
-                    if (view !== 'inspector' || !selectedItemId) return;
-                    const tag = document.activeElement?.tagName?.toLowerCase();
-                    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-                    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-                        e.preventDefault();
-                        const idx = filteredItems.findIndex(i => i.id_item === selectedItemId);
-                        if (idx === -1) return;
-                        const next = e.key === 'ArrowLeft' ? idx - 1 : idx + 1;
-                        if (next >= 0 && next < filteredItems.length) {
-                            setSelectedItemId(filteredItems[next].id_item);
-                            const container = document.getElementById('inspector-scroll-container');
-                            if (container) container.scrollTop = 0;
-                        }
-                    }
-                };
-                window.addEventListener('keydown', handler);
-                return () => window.removeEventListener('keydown', handler);
-            }, [view, selectedItemId, filteredItems, showErrorToast, itemsReady, projectModal]);
+            const handleHistoryShortcut = (event) => {
+                if (event.defaultPrevented || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return false;
+                const key = event.key.toLowerCase();
+                const direction = key === 'z' ? (event.shiftKey ? 'redo' : 'undo')
+                    : (key === 'y' && event.ctrlKey && !event.metaKey && !event.shiftKey ? 'redo' : null);
+                if (!direction) return false;
+                const active = document.activeElement;
+                const isEditor = element => element?.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(element?.tagName?.toUpperCase());
+                if (isEditor(active) || isEditor(event.target) || projectModal || newDocModal || deleteConfirm) return true;
+                event.preventDefault();
+                restoreHistory(direction);
+                return true;
+            };
+
+            useEffect(() => { fetchData(); }, []);
 
             // --- COMPUTED DATA ---
 
@@ -1924,6 +2096,32 @@
                 return { filteredItems: filtered, searchMatchMap: matchMap };
             }, [items, selectedRule, selectedSubpart, searchQuery, searchFields, activeFilters]);
 
+            // E008: Arrow key shortcuts for Prev/Next in inspector
+            // E016: Ctrl+Z / Ctrl+Shift+Z undo/redo
+            useEffect(() => {
+                const handler = (e) => {
+                    if (handleHistoryShortcut(e)) return;
+                    if (projectModal || newDocModal || deleteConfirm) return;
+                    // E008: Arrow keys for inspector
+                    if (view !== 'inspector' || !selectedItemId) return;
+                    const tag = document.activeElement?.tagName?.toLowerCase();
+                    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+                    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                        e.preventDefault();
+                        const idx = filteredItems.findIndex(i => i.id_item === selectedItemId);
+                        if (idx === -1) return;
+                        const next = e.key === 'ArrowLeft' ? idx - 1 : idx + 1;
+                        if (next >= 0 && next < filteredItems.length) {
+                            setSelectedItemId(filteredItems[next].id_item);
+                            const container = document.getElementById('inspector-scroll-container');
+                            if (container) container.scrollTop = 0;
+                        }
+                    }
+                };
+                window.addEventListener('keydown', handler);
+                return () => window.removeEventListener('keydown', handler);
+            }, [view, selectedItemId, filteredItems, showErrorToast, itemsReady, sourcesReady, projectModal, newDocModal, deleteConfirm]);
+
             const projectScopeDescription = projectScope === 'draft'
                 ? 'All top-level Draft items across the entire project, plus every supporting descendant. Search, category, quick filters, and Draft part filters do not narrow this scope.'
                 : projectScope === 'checked'
@@ -2031,38 +2229,12 @@
 
             const handleItemChange = (field, value) => {
                 if (!selectedItemId || !itemsReady) return;
-                const newItems = items.map(i => i.id_item === selectedItemId ? { ...i, [field]: value } : i);
-                // Capture pre-edit state for undo (only on first keystroke in debounce window)
-                if (!inspectorSaveTimer.current) {
-                    inspectorUndoSnapshot.current = [...itemsRef.current];
-                }
-                // Immediate local update for responsive UI
-                setItems(newItems);
-                // Debounced save to server + undo stack (600ms after last keystroke)
-                if (inspectorSaveTimer.current) clearTimeout(inspectorSaveTimer.current);
-                inspectorSaveTimer.current = setTimeout(() => {
-                    // Push the pre-edit snapshot to undo stack
-                    undoStack.current.push(inspectorUndoSnapshot.current);
-                    if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
-                    redoStack.current = [];
-                    inspectorUndoSnapshot.current = null;
-                    inspectorSaveTimer.current = null;
-                    // Persist through the central queue (setItems already ran).
-                    queueItemsSave(newItems);
-                }, 600);
+                stageItemEdit(itemsRef.current.map(i => i.id_item === selectedItemId ? { ...i, [field]: value } : i));
             };
 
             const handleSourceChange = (id, field, value) => {
                 if (!sourcesReady) return;
-                const newSources = sources.map(s => s.id_source === id ? { ...s, [field]: value } : s);
-                // Immediate local update for responsive UI
-                setSources(newSources);
-                // Debounced save to server (600ms)
-                if (sourceSaveTimer.current) clearTimeout(sourceSaveTimer.current);
-                sourceSaveTimer.current = setTimeout(() => {
-                    sourceSaveTimer.current = null;
-                    queueSourcesSave(newSources);
-                }, 600);
+                stageSourceEdit(sourcesRef.current.map(s => s.id_source === id ? { ...s, [field]: value } : s));
             };
 
             // Bulk update rule name/number for all items with a specific rule_name
@@ -2083,12 +2255,7 @@
 
                     return { ...item, rule_name: updatedRuleNames, rule_number: updatedRuleNums };
                 });
-                // Immediate local update for responsive UI
-                setItems(newItems);
-                // Queue save on the closure-captured newItems — no debounce needed here
-                // because the save queue already coalesces rapid requests, and reading
-                // itemsRef.current inside a timer could race with concurrent Inspector edits.
-                queueItemsSave(newItems);
+                saveItems(newItems);
             };
 
             const createNewItem = () => {
@@ -2193,6 +2360,7 @@
                     if (json.status === 'success') {
                         setSourcesFilename(json.filename);
                         applyDocumentState('sources', json.document);
+                        sourcesHistoryDocumentToken.current = json.document.token;
                         setSourcesReady(true);
                         setLoadError(null);
                         setStatus('Saved As ' + json.filename);
@@ -2960,6 +3128,15 @@
                                     </button>
                                 </div>
                                 <span role="status" aria-live="polite" aria-atomic="true" className={`text-xs font-mono px-2 py-1 rounded uppercase ${status.includes('Error') ? 'text-red-400 bg-red-900/20' : 'text-green-400 bg-green-900/20'}`}>{status}</span>
+                                <div role="group" aria-label={view === 'sources' ? 'Source history' : 'Item history'} className="flex items-center gap-1">
+                                    <button type="button" className="card-action" title={view === 'sources' ? 'Undo source change (⌘Z / Ctrl+Z)' : 'Undo item change (⌘Z / Ctrl+Z)'}
+                                        disabled={projectModal || newDocModal || Boolean(deleteConfirm) || (view === 'sources' ? !sourcesReady || (!sourceUndoStack.current.length && !sourceUndoSnapshot.current) : !itemsReady || (!undoStack.current.length && !inspectorUndoSnapshot.current))}
+                                        onClick={() => restoreHistory('undo')}>↶ Undo</button>
+                                    <button type="button" className="card-action" title="Redo (⌘Shift+Z / Ctrl+Shift+Z / Ctrl+Y)"
+                                        disabled={projectModal || newDocModal || Boolean(deleteConfirm) || (view === 'sources' ? !sourcesReady || !sourceRedoStack.current.length || Boolean(sourceUndoSnapshot.current) : !itemsReady || !redoStack.current.length || Boolean(inspectorUndoSnapshot.current))}
+                                        onClick={() => restoreHistory('redo')}>↷ Redo</button>
+                                </div>
+
                                 {/* Save As button */}
                                 <div className="relative">
                                     <button
@@ -3862,65 +4039,9 @@
                                                         <Icon name="link" className="text-emerald-500" />
                                                         Linked Source
                                                     </h2>
-                                                    {(() => {
-                                                        const currentSource = sourceById.get(currentItem.id_source);
-                                                        const filtered = srcQuery
-                                                            ? sources.filter(s =>
-                                                                (s.short_cite || '').toLowerCase().includes(srcQuery.toLowerCase()) ||
-                                                                (s.title || '').toLowerCase().includes(srcQuery.toLowerCase())
-                                                            )
-                                                            : sources;
-                                                        return (
-                                                            <div className="flex items-center gap-2">
-                                                                <label htmlFor="source-connect-search" className="text-xs text-slate-500 uppercase font-bold shrink-0">Connect:</label>
-                                                                <div className="flex items-center gap-1">
-                                                                    <input
-                                                                        id="source-connect-search"
-                                                                        type="text"
-                                                                        className="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded px-2 py-1 w-[240px] focus:border-emerald-500 outline-none"
-                                                                        placeholder={currentSource ? currentSource.short_cite : '-- Search sources --'}
-                                                                        value={srcOpen ? srcQuery : (currentSource ? currentSource.short_cite : '')}
-                                                                        onFocus={() => { setSrcOpen(true); setSrcQuery(''); }}
-                                                                        onChange={(e) => setSrcQuery(e.target.value)}
-                                                                        onBlur={() => setTimeout(() => setSrcOpen(false), 200)}
-                                                                    />
-                                                                    {currentItem.id_source && (
-                                                                        <button
-                                                                            onClick={() => handleItemChange('id_source', '')}
-                                                                            className="p-1 text-slate-600 hover:text-red-400 transition-colors"
-                                                                            title="Unlink source"
-                                                                        >
-                                                                            <Icon name="x" size={12} />
-                                                                        </button>
-                                                                    )}
-                                                                    {srcOpen && (
-                                                                        <div className="absolute left-0 top-full mt-1 z-50 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl shadow-black/50 max-h-[240px] overflow-y-auto w-[320px]">
-                                                                            {filtered.length === 0 ? (
-                                                                                <div className="px-3 py-2 text-xs text-slate-600">No sources match "{srcQuery}"</div>
-                                                                            ) : (
-                                                                                filtered.map(s => (
-                                                                                    <button
-                                                                                        key={s.id_source}
-                                                                                        onMouseDown={(e) => {
-                                                                                            e.preventDefault();
-                                                                                            handleItemChange('id_source', s.id_source);
-                                                                                            setSrcOpen(false);
-                                                                                            setSrcQuery('');
-                                                                                        }}
-                                                                                        className={`w-full text-left px-3 py-2 text-xs hover:bg-emerald-600/30 transition-colors flex items-center gap-2 ${s.id_source === currentItem.id_source ? 'bg-emerald-900/30 text-emerald-300' : 'text-slate-300'}`}
-                                                                                    >
-                                                                                        <Icon name="database" size={10} className="text-emerald-500/50 shrink-0" />
-                                                                                        <span className="truncate">{s.short_cite}</span>
-                                                                                    </button>
-                                                                                ))
-                                                                            )}
-
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })()}
+                                                    <SourcePicker key={currentItem.id_item}
+                                                        sources={sources} selectedId={currentItem.id_source}
+                                                        onSelect={id => handleItemChange('id_source', id)} />
                                                 </div>
                                                 {(() => {
                                                     const linkedSource = getSourceForItem(currentItem);
@@ -3970,9 +4091,11 @@
                                                 item={items.find(i => i.id_item === selectedItemId)}
                                                 labels={labels}
                                                 onSave={(newItem) => saveItems(itemsRef.current.map(i => i.id_item === newItem.id_item ? newItem : i))}
-                                                onLocalChange={(newItem) => setItems(prev => prev.map(i => i.id_item === newItem.id_item ? newItem : i))}
+                                                onLocalChange={(newItem, timer) => stageItemEdit(itemsRef.current.map(i => i.id_item === newItem.id_item ? newItem : i), timer)}
                                                 noteSaveTimer={exampleNoteSaveTimer}
                                             />
+
+                                            <ReportMetadata report={items.find(i => i.id_item === selectedItemId)?.report_provenance} />
 
                                             {/* --- 5. ADDITIONAL INFORMATION (collapsible) --- */}
                                             <AdditionalInfoManager
@@ -4142,14 +4265,8 @@
                                                     value={item.user_02_comments || ''}
                                                     onChange={(e) => {
                                                         const val = e.target.value;
-                                                        // Immediate local update for responsiveness
-                                                        setItems(prev => prev.map(it => it.id_item === item.id_item ? { ...it, user_02_comments: val } : it));
+                                                        stageItemEdit(itemsRef.current.map(it => it.id_item === item.id_item ? { ...it, user_02_comments: val } : it), draftSaveTimer);
                                                         autoResizeTextarea(e);
-                                                        // Debounced save to server
-                                                        if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
-                                                        draftSaveTimer.current = setTimeout(() => {
-                                                            saveItems(itemsRef.current.map(it => it.id_item === item.id_item ? { ...it, user_02_comments: val } : it));
-                                                        }, 600);
                                                     }}
                                                     onFocus={(e) => autoResizeTextarea(e)}
                                                     onInput={(e) => autoResizeTextarea(e)}
@@ -4375,14 +4492,8 @@
                                                     value={item.user_02_comments || ''}
                                                     onChange={(e) => {
                                                         const val = e.target.value;
-                                                        // Immediate local update for responsiveness
-                                                        setItems(prev => prev.map(it => it.id_item === item.id_item ? { ...it, user_02_comments: val } : it));
+                                                        stageItemEdit(itemsRef.current.map(it => it.id_item === item.id_item ? { ...it, user_02_comments: val } : it), draftSaveTimer);
                                                         autoResizeTextarea(e);
-                                                        // Debounced save to server
-                                                        if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
-                                                        draftSaveTimer.current = setTimeout(() => {
-                                                            saveItems(itemsRef.current.map(it => it.id_item === item.id_item ? { ...it, user_02_comments: val } : it));
-                                                        }, 600);
                                                     }}
                                                     onFocus={(e) => autoResizeTextarea(e)}
                                                     onInput={(e) => autoResizeTextarea(e)}
@@ -4472,6 +4583,7 @@
                                         const totalSources = stats.total_sources || stats.sources || 0;
                                         const files = parseResult.files || (parseResult.title ? [{ title: parseResult.title, stats: parseResult.stats }] : []);
                                         const parserCollisions = Array.isArray(parseResult.collisions) ? parseResult.collisions : [];
+                                        const importReview = getDrrImportReview(parseResult, [...items, ...sources]);
                                         return (
                                             <>
                                                 {/* Stats bar */}
@@ -4494,17 +4606,23 @@
                                                     <span className="text-xs text-slate-500 font-mono truncate flex-1">{parseResult.selected_path || parseResult.filepath || ''}</span>
                                                     <div className="flex items-center gap-2 shrink-0">
                                                         <button
-                                                            disabled={parseSaving || parserCollisions.length > 0}
-                                                            title={parserCollisions.length > 0 ? 'Resolve source ID collisions before saving' : ''}
+                                                            disabled={parseSaving || !importReview.canSave}
+                                                            title={!importReview.canSave ? 'Resolve the report errors below before saving' : ''}
                                                             onClick={async () => {
+                                                                const documentTokens = [itemsDocumentRef.current?.token, sourcesDocumentRef.current?.token];
                                                                 setParseSaving(true);
                                                                 setParseError(null);
                                                                 try {
                                                                     await flushAllPendingDocumentSaves();
+                                                                    if (documentTokens[0] !== itemsDocumentRef.current?.token || documentTokens[1] !== sourcesDocumentRef.current?.token) {
+                                                                        throw new Error('Active documents changed while saving pending edits. Review the import again.');
+                                                                    }
                                                                     const r = await api('save_import_document', {
                                                                         method: 'POST',
                                                                         headers: { 'Content-Type': 'application/json' },
                                                                         body: JSON.stringify({
+                                                                            can_import: parseResult.can_import,
+                                                                            diagnostics: parseResult.diagnostics,
                                                                             items: parseResult.items,
                                                                             sources: parseResult.sources,
                                                                             selected_path: parseResult.selected_path || parseResult.filepath,
@@ -4542,45 +4660,49 @@
                                                             <Icon name="file-plus" size={14} /> {parseSaving ? 'Saving...' : 'Save to New File'}
                                                         </button>
                                                         <button
-                                                            disabled={parseSaving || parserCollisions.length > 0}
-                                                            title={parserCollisions.length > 0 ? 'Resolve source ID collisions before appending' : ''}
+                                                            disabled={parseSaving || !importReview.canAppend}
+                                                            title={!importReview.canAppend ? 'Review the import messages below' : ''}
                                                             onClick={async () => {
-                                                                const importedSources = parseResult.sources || [];
-                                                                const existingSourcesById = new Map(sources.map(source => [source.id_source, source]));
-                                                                const importedSourcesById = new Map();
-                                                                const collisionIds = new Set();
-                                                                const sourceRecordsMatch = (first, second) => {
-                                                                    const keys = new Set([...Object.keys(first || {}), ...Object.keys(second || {})]);
-                                                                    return [...keys].every(key => JSON.stringify(first?.[key] ?? null) === JSON.stringify(second?.[key] ?? null));
-                                                                };
-
-                                                                importedSources.forEach(source => {
-                                                                    const sourceId = source.id_source;
-                                                                    if (!sourceId) return;
-                                                                    if (importedSourcesById.has(sourceId)) collisionIds.add(sourceId);
-                                                                    else importedSourcesById.set(sourceId, source);
-                                                                    const existingSource = existingSourcesById.get(sourceId);
-                                                                    if (existingSource && !sourceRecordsMatch(existingSource, source)) {
-                                                                        collisionIds.add(sourceId);
-                                                                    }
-                                                                });
-
-                                                                if (collisionIds.size > 0) {
-                                                                    const ids = [...collisionIds].sort();
-                                                                    setParseError(`Append stopped: source ID collision${ids.length === 1 ? '' : 's'}: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ` (+${ids.length - 5} more)` : ''}`);
-                                                                    setStatus('Append Error');
-                                                                    return;
-                                                                }
-
-                                                                const importedItems = normalizeItems(parseResult.items, 'research');
-                                                                const newItems = [...items, ...importedItems];
-                                                                const existingSourceIds = new Set(sources.map(s => s.id_source));
-                                                                const newSources = [...sources, ...importedSources.filter(s => !existingSourceIds.has(s.id_source))];
+                                                                const documentTokens = [itemsDocumentRef.current?.token, sourcesDocumentRef.current?.token];
                                                                 setParseSaving(true);
                                                                 setParseError(null);
                                                                 setStatus('Appending import...');
                                                                 try {
                                                                     await flushAllPendingDocumentSaves();
+                                                                    if (documentTokens[0] !== itemsDocumentRef.current?.token || documentTokens[1] !== sourcesDocumentRef.current?.token) {
+                                                                        throw new Error('Active documents changed while saving pending edits. Review the import again.');
+                                                                    }
+                                                                    const importedSources = parseResult.sources || [];
+                                                                    const existingSourcesById = new Map(sourcesRef.current.map(source => [source.id_source, source]));
+                                                                    const importedSourcesById = new Map();
+                                                                    const collisionIds = new Set();
+                                                                    const sourceRecordsMatch = (first, second) => {
+                                                                        const keys = new Set([...Object.keys(first || {}), ...Object.keys(second || {})]);
+                                                                        return [...keys].every(key => JSON.stringify(first?.[key] ?? null) === JSON.stringify(second?.[key] ?? null));
+                                                                    };
+
+                                                                    importedSources.forEach(source => {
+                                                                        const sourceId = source.id_source;
+                                                                        if (!sourceId) return;
+                                                                        if (importedSourcesById.has(sourceId)) collisionIds.add(sourceId);
+                                                                        else importedSourcesById.set(sourceId, source);
+                                                                        const existingSource = existingSourcesById.get(sourceId);
+                                                                        if (existingSource && !sourceRecordsMatch(existingSource, source)) {
+                                                                            collisionIds.add(sourceId);
+                                                                        }
+                                                                    });
+
+                                                                    if (collisionIds.size > 0) {
+                                                                        const ids = [...collisionIds].sort();
+                                                                        setParseError(`Append stopped: source ID collision${ids.length === 1 ? '' : 's'}: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ` (+${ids.length - 5} more)` : ''}`);
+                                                                        setStatus('Append Error');
+                                                                        return;
+                                                                    }
+
+                                                                    const importedItems = normalizeItems(parseResult.items, 'research');
+                                                                    const newItems = [...itemsRef.current, ...importedItems];
+                                                                    const existingSourceIds = new Set(sourcesRef.current.map(s => s.id_source));
+                                                                    const newSources = [...sourcesRef.current, ...importedSources.filter(s => !existingSourceIds.has(s.id_source))];
                                                                     const response = await api('append_import', {
                                                                         method: 'POST',
                                                                         headers: { 'Content-Type': 'application/json' },
@@ -4588,6 +4710,8 @@
                                                                             items: denormalizeItems(newItems, schemaModeRef.current),
                                                                             sources: newSources,
                                                                             imported_sources: importedSources,
+                                                                            can_import: parseResult.can_import,
+                                                                            diagnostics: parseResult.diagnostics,
                                                                             items_document: itemsDocumentRef.current,
                                                                             sources_document: sourcesDocumentRef.current,
                                                                         }),
@@ -4616,6 +4740,8 @@
                                                         </button>
                                                     </div>
                                                 </div>
+
+                                                <DrrImportReview result={parseResult} review={importReview} />
 
                                                 {parserCollisions.length > 0 && (
                                                     <div role="alert" className="bg-red-900/30 border border-red-700 text-red-200 px-4 py-3 rounded-lg mb-6 text-sm">
@@ -4727,6 +4853,7 @@
                                                 </div>
 
                                                 <div className="grid grid-cols-12 gap-4">
+                                                    <ReportMetadata report={source.report_provenance} />
                                                     {Object.keys(SOURCE_TEMPLATE).map(key => {
                                                         if (['id_source'].includes(key)) return null;
                                                         return renderField(source, key, (k, v) => handleSourceChange(source.id_source, k, v), true);

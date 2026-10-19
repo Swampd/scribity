@@ -36,3 +36,15 @@ npm run test:project-ui
 These Node tests execute the actual dashboard handlers with in-memory API/state
 stubs, including pending-save flushing, scope selection, cancellation, and
 explicit pair activation. They do not verify rendered layout or native dialogs.
+
+DRR compatibility and persistence tests use `tests/fixtures/drr/` and temporary
+files. `test_drr_compatibility.py` checks publication/event-date separation,
+metadata, stable identity, citations, and explicit extraction diagnostics.
+`test_drr_persistence.py` exercises import → save → reopen → structured episode
+export, plus duplicate imports, cancellation, stale sessions, write races, and
+paired rollback. Dependencies must first be installed from `requirements.txt`.
+
+Run all browser-free frontend checks with `npm run test:unit`. The DRR component
+and handler checks cover diagnostic display, read-only metadata, pending-edit
+flushing, and document changes during a save. They do not verify pixels or
+website behavior.
