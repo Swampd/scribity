@@ -55,4 +55,23 @@ test('full App renders, runs mount effects, and loads both documents without sta
   assert.match(rendered, /Startup fixture/);
   assert.match(rendered, /fixture-sources.json/);
   assert.doesNotMatch(rendered, /Load Error|is not defined/);
+
+  const find = (node, predicate) => {
+    if (!node || typeof node !== 'object') return [];
+    if (Array.isArray(node)) return node.flatMap(child => find(child, predicate));
+    return [...(predicate(node) ? [node] : []), ...find(node.props?.children, predicate)];
+  };
+  const toolbar = find(tree, node => node.props?.['aria-label'] === 'Application controls')[0];
+  assert.ok(toolbar, 'Toolbar must have an identifiable responsive container');
+  assert.match(toolbar.props.className, /flex-wrap/);
+  assert.doesNotMatch(toolbar.props.className, /(?:^|\s)h-14(?:\s|$)|overflow-hidden/);
+  const create = find(toolbar, node => node.type === 'button' && node.props.title === 'Create new...')[0];
+  assert.match(JSON.stringify(create.props.children), /New/);
+  assert.equal(create.props['aria-expanded'], false);
+  create.props.onClick();
+  cursor = 0; tree = App();
+  const menu = find(tree, node => node.props?.id === 'create-new-menu')[0];
+  assert.ok(menu, 'New button must open its menu');
+  assert.match(JSON.stringify(menu), /New Item/);
+  assert.match(JSON.stringify(menu), /New Document/);
 });

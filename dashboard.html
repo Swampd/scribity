@@ -3055,9 +3055,9 @@
                     <div className="flex-1 flex flex-col bg-slate-950 min-w-0">
 
                         {/* Header */}
-                        <div className="h-14 border-b border-slate-800 flex items-center px-6 justify-between shrink-0 bg-slate-950/80 backdrop-blur z-30 relative">
-                            <div className="flex items-center gap-4">
-                                <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
+                        <div role="region" aria-label="Application controls" className="min-h-14 border-b border-slate-800 flex flex-wrap items-center gap-3 px-4 py-2 justify-between shrink-0 bg-slate-950/80 backdrop-blur z-30 relative">
+                            <div className="flex flex-wrap items-center gap-3 min-w-0 max-w-full">
+                                <div className="flex flex-wrap items-center gap-1 max-w-full bg-slate-900 p-1 rounded-lg border border-slate-800">
                                     <button onClick={() => setView('library')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'library' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Library</button>
                                     <button onClick={() => setView('inspector')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'inspector' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Inspector</button>
                                     <button onClick={() => setView('draft')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'draft' ? 'bg-green-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Draft</button>
@@ -3065,12 +3065,12 @@
                                     <button onClick={() => setView('sources')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'sources' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Sources</button>
                                     <button onClick={() => setView('parser')} className={`px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-wide transition-colors ${view === 'parser' ? 'bg-orange-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>Parser</button>
                                 </div>
-                                <div className="relative" ref={searchFieldsRef}>
+                                <div className="relative min-w-0 max-w-full" ref={searchFieldsRef}>
                                     <Icon name="search" size={14} className="absolute left-3 top-2 text-slate-500" />
                                     <input
                                         type="text"
                                         placeholder="Search all fields..."
-                                        className="bg-slate-900 border border-slate-700 text-slate-300 text-xs rounded-full pl-9 pr-8 py-1.5 focus:border-indigo-500 outline-none w-64"
+                                        className="bg-slate-900 border border-slate-700 text-slate-300 text-xs rounded-full pl-9 pr-8 py-1.5 focus:border-indigo-500 outline-none w-64 max-w-full"
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
                                     />
@@ -3117,9 +3117,9 @@
                                     )}
                                 </div>
                             </div>
-                            <div className="flex items-center gap-4">
+                            <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
                                 {/* File Picker Buttons */}
-                                <div className="flex items-center gap-2 border-r border-slate-700 pr-4">
+                                <div className="flex flex-wrap items-center gap-2 max-w-full border-r border-slate-700 pr-2">
                                     <button onClick={openItemsPicker} className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors" title="Open Items JSON">
                                         <Icon name="folder-open" size={12} /> Items: <span className="text-indigo-400 max-w-[80px] truncate">{itemsFilename}</span>
                                     </button>
@@ -3172,18 +3172,22 @@
                                     <button
                                         ref={createButtonRef}
                                         onClick={() => setShowCreateMenu(!showCreateMenu)}
-                                        className="bg-indigo-600 hover:bg-indigo-500 text-white w-8 h-8 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-900/30 transition-all hover:scale-105 active:scale-95"
+                                        type="button"
+                                        aria-expanded={showCreateMenu}
+                                        aria-controls={showCreateMenu ? 'create-new-menu' : undefined}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white min-h-8 px-3 py-1 rounded-lg flex items-center justify-center gap-2 whitespace-nowrap text-xs font-bold border border-indigo-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300 shadow-lg shadow-indigo-900/30"
                                         title="Create new..."
                                     >
-                                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                                        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
                                             <line x1="8" y1="2" x2="8" y2="14" />
                                             <line x1="2" y1="8" x2="14" y2="8" />
                                         </svg>
+                                        New
                                     </button>
                                     {showCreateMenu && (
                                         <>
                                             <div className="fixed inset-0 z-40" onClick={() => setShowCreateMenu(false)} />
-                                            <div className="absolute right-0 top-full mt-2 z-50 bg-slate-800 border border-slate-600 rounded-lg shadow-2xl shadow-black/50 overflow-hidden min-w-[160px]" style={{ animation: 'slideIn 0.15s ease-out' }}>
+                                            <div id="create-new-menu" className="absolute right-0 top-full mt-2 z-50 bg-slate-800 border border-slate-600 rounded-lg shadow-2xl shadow-black/50 overflow-hidden min-w-[160px]" style={{ animation: 'slideIn 0.15s ease-out' }}>
                                                 <button
                                                     onClick={() => { createNewItem(); setShowCreateMenu(false); }}
                                                     className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-200 hover:bg-indigo-600 hover:text-white transition-colors"
