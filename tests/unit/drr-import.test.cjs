@@ -89,6 +89,7 @@ function importHandler(label, overrides = {}) {
   const calls = [];
   const original = [{ id_item: 'old', script_notes: 'before pending edit' }];
   const ctx = {
+    unifiedProjectRef: { current: null },
     parseResult: { items: [{ id_item: 'imported' }], sources: [], can_import: true, diagnostics: [] },
     importReview: { canSave: true, canAppend: true }, getDrrImportReview,
     items: original, sources: [], itemsRef: { current: original }, sourcesRef: { current: [] },

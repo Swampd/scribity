@@ -132,7 +132,7 @@ test('open failure leaves both existing document sessions intact', async () => {
 test('manual paths use the same saved preview; missing native dialogs expose fallback', async () => {
   const h = harness({ projectManualPaths: true, projectItemsPath: '/new/items.json', projectSourcesPath: '/new/sources.json' });
   await h.saveProject();
-  assert.deepEqual(requests(h.calls)[0].payload, { preview_token: 'preview-1', items_path: '/new/items.json', sources_path: '/new/sources.json' });
+  assert.deepEqual(requests(h.calls)[0].payload, { preview_token: 'preview-1', single_file: true, path: '/new/items.json' });
   const fallback = harness({ api: async () => ({ status: 'gui_unavailable', message: 'Use file paths' }) });
   await fallback.saveProject();
   assert.ok(fallback.calls.some(c => c.set === 'ProjectManualPaths' && c.value === true));

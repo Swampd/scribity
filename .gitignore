@@ -2,6 +2,10 @@
 items.json
 sources.json
 scribity_config.json
+project.json
+scribity_project*.json
+*.scribity.json
+.scribity-project-*.tmp
 *.json.tmp
 
 # === Working files ===

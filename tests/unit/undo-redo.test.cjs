@@ -6,7 +6,7 @@ const html = fs.readFileSync(require('node:path').join(__dirname, '../../dashboa
 function harness(overrides = {}) {
   const timers = new Map(), saves = [];
   let timerId = 0;
-  const ctx = {view:'library', itemsReady:true, sourcesReady:true, projectModal:false, newDocModal:false, deleteConfirm:null,
+  const ctx = {unifiedProjectRef:{current:null},projectActionBusyRef:{current:false},view:'library', itemsReady:true, sourcesReady:true, projectModal:false, newDocModal:false, deleteConfirm:null,
     undoStack:{current:[]}, redoStack:{current:[]}, sourceUndoStack:{current:[]}, sourceRedoStack:{current:[]},
     itemsRef:{current:[{id_item:'i',script_notes:'before'}]}, sourcesRef:{current:[{id_source:'s',title:'before'}]},
     inspectorUndoSnapshot:{current:null}, sourceUndoSnapshot:{current:null},
@@ -106,7 +106,7 @@ test('history saves use the current document token after Save As, not an older r
  const start=html.indexOf('            const queueItemsSave =');
  const end=html.indexOf('            const flushPendingDocumentSaves =',start);
  const jobs=[];
- const ctx={itemsReady:true,sourcesReady:true,schemaModeRef:{current:'research'},
+ const ctx={unifiedProjectRef:{current:null},itemsReady:true,sourcesReady:true,schemaModeRef:{current:'research'},
   itemsDocument:{token:'old-items'},sourcesDocument:{token:'old-sources'},
   itemsDocumentRef:{current:{token:'new-items',revision:2}},sourcesDocumentRef:{current:{token:'new-sources',revision:3}},
   itemsSaveQueue:{},sourcesSaveQueue:{},enqueueSave:(_,job)=>jobs.push(job),denormalizeItems:x=>x};

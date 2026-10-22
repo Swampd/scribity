@@ -10,13 +10,13 @@ Scribity keeps research documents on the user's computer and combines source man
 
 ## Highlights
 
-- Local JSON documents remain under the user's control.
+- One editable JSON project contains items, sources, and project metadata.
 - Items link directly to structured source records.
 - Categories, subparts, tags, filters, and a reorderable Stage help shape large collections of evidence.
 - Draft and Render views turn selected material into an ordered narrative.
 - An MDX parser previews structured report imports before saving them.
 - Optimistic document revisions reject stale saves from old tabs or previously opened files.
-- Paired item/source writes use validation, temporary files, and rollback protection.
+- Unified project saves validate both lists and publish one atomic file replacement; legacy pair support remains available for conversion.
 - Undo history and delayed saves are isolated when switching documents.
 - macOS and Windows launchers are included.
 
@@ -50,7 +50,7 @@ On Windows, activate the environment with `.venv\Scripts\activate` and run `pyth
 
 Once dependencies are installed in `.venv`, `scribity.bat` uses `.venv\Scripts\python.exe` automatically; activation is not required when double-clicking it. `start_scribity.py` also prefers the project's `.venv` interpreter on Windows, macOS, and Linux.
 
-Scribity opens at [http://localhost:8000](http://localhost:8000). To explore without personal data, use the file controls to open:
+Scribity opens at [http://localhost:8000](http://localhost:8000). To explore without personal data, use **+ New → Import legacy items/sources pair…**, select the two example files below, and save a new project JSON:
 
 - Items: `examples/research-items.json`
 - Sources: `examples/research-sources.json`
@@ -59,24 +59,28 @@ The `examples/` directory also includes an improv-oriented document pair. Every 
 
 ## How documents work
 
-Scribity uses two related JSON arrays:
+Use **Open Project** to load one versioned JSON containing two related arrays:
 
 | Document | Purpose |
 | --- | --- |
 | Items | Quotations, notes, examples, categories, ordering, and drafting metadata |
 | Sources | Bibliographic and reference information linked through `id_source` |
 
-Starter structures are available in `schema_research_items.json`, `schema_improv_items.json`, and `schema_sources.json`. User documents and `scribity_config.json` are ignored by Git so personal research is not committed accidentally.
+Use **Convert loaded pair** for the pair already open, or **+ New → Import legacy items/sources pair…** for another pair. Conversion creates and opens a new file; original files are never overwritten. **+ New → New Project** creates an empty project. **Save As…** saves and opens a new copy. Choose a new filename; autosave updates the current file.
+
+See [the project JSON format](docs/PROJECT_JSON.md) for the envelope, manual editing, preservation rules, and known limitations. Restart the server after updating to load the project endpoints.
+
+Starter structures are available in `schema_research_items.json`, `schema_improv_items.json`, and `schema_sources.json`. Default working filenames and `scribity_config.json` are ignored by Git. Store custom-named research projects outside the code checkout, or add their paths to your local ignore list.
 
 ## Data-safety design
 
 The application treats document integrity as a first-class concern:
 
-1. Loads and saves require arrays of JSON objects.
-2. Every active document receives an opaque token and revision.
+1. Projects validate their format/version, both record lists, and stable unique identities.
+2. Every unified project receives one shared opaque token and revision.
 3. Saves from an old document or stale browser tab are rejected.
 4. Delayed edits are flushed before a document switch completes.
-5. Operations that update both item and source files stage both writes and roll back if the second commit fails.
+5. A unified project updates both lists in one atomic file replacement. Legacy pair operations retain their paired-write protections.
 
 These safeguards are covered by server, parser, document-session, accessibility, and browser-interaction tests.
 
@@ -122,7 +126,7 @@ Your existing Draft is already the selection; you do not need to check cards.
 The copied research goes into the new project’s Library, with an empty Draft
 ready for a fresh story order. The original project and Draft remain intact.
 
-You can also use **+ → Create project from selection**. Choose the entire current Draft,
+You can also use **+ New → Create project from selection**. Choose the entire current Draft,
 checked Library items (including checks hidden by filters), or current filtered
 Library results. The dialog describes the scope; Draft selection ignores search,
 category, quick filters, and the Draft part filter. Supporting descendants are
@@ -134,13 +138,8 @@ always included recursively, even when their `id_script` is zero.
 2. Click **Preview project**. Pending edits are saved first. Review selected,
    additional supporting, total item, and source counts, plus any relationship
    notices. No relevance filtering or narrative reordering is performed.
-3. Click **Save new project…** and choose two new JSON filenames. Alternatively,
-   enter two absolute paths in existing folders. Neither active originals nor
-   other existing files can be overwritten. Canceling either dialog writes
-   neither file. A failed paired write rolls back the newly created first file.
-4. After both files save, choose **Open new project**, or **Done — keep original
-   open**. Opening activates the pair together and saves it as the next-start
-   project. Ordinary Save As and rendered script exports are unchanged.
+3. Click **Save new project…** and choose one new JSON filename, or enter an absolute path in an existing folder. Existing files cannot be overwritten. Canceling leaves the original project active.
+4. After saving, choose **Open new project**, or **Done — keep original open**. Opening loads both lists together and remembers the project for next launch. Rendered script exports remain separate.
 
 Research fields, IDs, notes, citations, category order, tags, script parts, and
 unknown metadata are copied. `nested_under` is the structural support link.
@@ -160,7 +159,7 @@ bibliography links and URLs are preserved without pulling in unrelated records.
 Previews expire after 30 minutes or a server restart (at most 16 are retained).
 Edits, file switches, or external file changes invalidate an unsaved preview;
 create a fresh one. Saved files remain available after a preview expires and can
-be opened through the ordinary Items/Sources controls. Publication uses atomic
+be opened through **Open Project**. Publication uses atomic
 no-overwrite hard links to staged files; a filesystem without hard-link support
 will fail safely, in which case save to a local folder that supports them.
 
@@ -184,9 +183,6 @@ Use the visible **Undo** and **Redo** buttons, or **⌘Z / Ctrl+Z** to undo and
 While typing in a text field, the browser retains its own text undo behavior;
 click outside the field or use the toolbar for document-level undo.
 
-The Sources view uses its own source history; other views use item history.
-Each retains up to 30 changes, including delayed Inspector, Draft/Render, and
-example-note edits. Undo cancels pending edit timers before restoring the saved
-snapshot. A new edit clears redo. Opening another document clears that
-document's history; Save As preserves it. Reloading clears both histories.
-Restored states are saved through the ordinary document save queue.
+Unified projects have one history across item and source actions, including imports that change both lists. Up to 30 actions are retained for the current session. Delayed Inspector, Draft/Render, example-note, and source edits are included. Undo cancels pending edit timers before restoring both lists. New edits clear redo. Opening another project clears history; Save As preserves it. Reloading clears history. Restored states use the same full-project save queue.
+
+Unconverted legacy pairs retain their previous separate item/source histories until conversion.

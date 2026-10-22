@@ -48,7 +48,7 @@ function useFakeDocuments(page, { cancelItemsOpen = false } = {}) {
     activeItems: 'a',
     activeSources: 'a',
     itemsVersion: { token: 'items-a', revision: 0 },
-    sourcesVersion: { token: 'sources-a', revision: 0 },
+    sourcesVersion: { token: 'items-a', revision: 0 },
     itemSaves: [],
     importSaves: [],
   };
@@ -59,52 +59,34 @@ function useFakeDocuments(page, { cancelItemsOpen = false } = {}) {
     let result;
     let status = 200;
 
+    const projectResponse = () => ({
+      status: 'success', items: state.items[state.activeItems], sources: state.sources[state.activeSources],
+      items_filename: `project-${state.activeItems}.json`, sources_filename: `project-${state.activeItems}.json`,
+      items_document: state.itemsVersion, sources_document: state.sourcesVersion, notices: [],
+      project: { filename: `project-${state.activeItems}.json`, path: `/projects/project-${state.activeItems}.json`,
+        name: 'Fixture', schema_mode: state.items[state.activeItems].some(item => 'category_part_name' in item) ? 'research' : 'improv' },
+    });
     switch (endpoint) {
       case 'data':
-        result = {
-          status: 'success',
-          items: state.items[state.activeItems],
-          sources: state.sources[state.activeSources],
-          items_filename: `items-${state.activeItems}.json`,
-          sources_filename: `sources-${state.activeSources}.json`,
-          items_document: state.itemsVersion,
-          sources_document: state.sourcesVersion,
-        };
+        result = projectResponse();
         break;
-      case 'save_items':
-        if (supplied.document_token !== state.itemsVersion.token || supplied.revision !== state.itemsVersion.revision) {
-          status = 409;
-          result = { status: 'error', kind: 'stale_document', message: 'Stale document' };
-          break;
+      case 'project/save':
+        if (supplied.items_document.token !== state.itemsVersion.token || supplied.items_document.revision !== state.itemsVersion.revision) {
+          status = 409; result = { status: 'error', kind: 'stale_document', message: 'Stale document' }; break;
         }
-        state.items[state.activeItems] = structuredClone(supplied.data);
-        state.itemSaves.push({ document: state.activeItems, data: structuredClone(supplied.data) });
+        state.items[state.activeItems] = structuredClone(supplied.items);
+        state.sources[state.activeSources] = structuredClone(supplied.sources);
+        state.itemSaves.push({ document: state.activeItems, data: structuredClone(supplied.items) });
         state.itemsVersion = { ...state.itemsVersion, revision: state.itemsVersion.revision + 1 };
-        result = { status: 'success', document: state.itemsVersion };
+        state.sourcesVersion = { ...state.itemsVersion };
+        result = projectResponse();
         break;
-      case 'open_items':
-        if (cancelItemsOpen) {
-          result = { status: 'canceled' };
-          break;
-        }
-        state.activeItems = 'b';
-        state.itemsVersion = { token: 'items-b', revision: 0 };
-        result = {
-          status: 'success',
-          data: state.items.b,
-          filename: 'items-b.json',
-          document: state.itemsVersion,
-        };
-        break;
-      case 'open_sources':
-        state.activeSources = 'b';
-        state.sourcesVersion = { token: 'sources-b', revision: 0 };
-        result = {
-          status: 'success',
-          data: state.sources.b,
-          filename: 'sources-b.json',
-          document: state.sourcesVersion,
-        };
+      case 'project/action':
+        if (cancelItemsOpen) { result = { status: 'canceled' }; break; }
+        if (supplied.operation !== 'open') throw new Error('Unexpected project action');
+        state.activeItems = state.activeSources = 'b';
+        state.itemsVersion = state.sourcesVersion = { token: 'items-b', revision: 0 };
+        result = projectResponse();
         break;
       case 'parse_drr_picker':
         result = {
@@ -121,15 +103,8 @@ function useFakeDocuments(page, { cancelItemsOpen = false } = {}) {
         state.importSaves.push(structuredClone(supplied));
         state.items[state.activeItems] = structuredClone(supplied.items);
         state.sources[state.activeSources] = structuredClone(supplied.sources);
-        state.itemsVersion = { token: 'imported-items', revision: 0 };
-        state.sourcesVersion = { token: 'imported-sources', revision: 0 };
-        result = {
-          status: 'success',
-          items_filename: 'scribity_items.json',
-          sources_filename: 'scribity_sources.json',
-          items_document: state.itemsVersion,
-          sources_document: state.sourcesVersion,
-        };
+        state.itemsVersion = state.sourcesVersion = { token: 'imported-project', revision: 0 };
+        result = projectResponse();
         break;
       default:
         status = 500;
@@ -142,23 +117,23 @@ function useFakeDocuments(page, { cancelItemsOpen = false } = {}) {
 }
 
 async function openAAndEdit(page, { waitForSave = true } = {}) {
-  await expect(page.getByTitle('Open Items JSON')).toContainText('items-a.json');
+  await expect(page.getByTitle('/projects/project-a.json')).toContainText('project-a.json');
   await page.getByText('Document A original', { exact: false }).click();
   const quote = page.locator('#quote-textarea');
   await expect(quote).toHaveValue('Document A original');
   await quote.fill('Document A edited');
-  if (waitForSave) await expect(page.getByText('Saved', { exact: true })).toBeVisible();
+  if (waitForSave) await expect(page.getByText('Project saved', { exact: true })).toBeVisible();
   return quote;
 }
 
-test('opening Items flushes the edit and prevents Undo from writing A into B', async ({ page }, testInfo) => {
+test('opening a project flushes the edit and prevents Undo from writing A into B', async ({ page }, testInfo) => {
   const state = useFakeDocuments(page);
   await page.goto(baseURL);
   await expect(page).toHaveTitle('Scribity');
   await expect(page.getByRole('button', { name: 'Library', exact: true })).toBeVisible();
   await openAAndEdit(page, { waitForSave: false });
-  await page.getByTitle('Open Items JSON').click();
-  await expect(page.getByTitle('Open Items JSON')).toContainText('items-b.json');
+  await page.getByRole('button', { name: 'Open Project', exact: true }).click();
+  await expect(page.getByTitle('/projects/project-b.json')).toContainText('project-b.json');
   await expect(page.getByText('Document B must remain unchanged', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Library', exact: true })).toHaveClass(/bg-indigo-600/);
   // The navigation buttons animate their colors; capture the settled state.
@@ -173,11 +148,11 @@ test('opening Items flushes the edit and prevents Undo from writing A into B', a
   expect(state.itemSaves).toHaveLength(savesBeforeUndo);
 });
 
-test('cancelled Items open retains the current document and its Undo history', async ({ page }) => {
+test('cancelled project open retains the current document and its Undo history', async ({ page }) => {
   const state = useFakeDocuments(page, { cancelItemsOpen: true });
   await page.goto(baseURL);
   await openAAndEdit(page);
-  await page.getByTitle('Open Items JSON').click();
+  await page.getByRole('button', { name: 'Open Project', exact: true }).click();
   await expect(page.getByText('Canceled', { exact: true })).toBeVisible();
   await page.keyboard.press('ControlOrMeta+z');
   await expect(page.locator('#quote-textarea')).toHaveValue('Document A original');
@@ -185,13 +160,13 @@ test('cancelled Items open retains the current document and its Undo history', a
   expect(state.items.b[0].quote_original).toBe('Document B must remain unchanged');
 });
 
-test('opening Sources preserves valid Items Undo history', async ({ page }) => {
+test('switching to Sources retains shared project Undo history', async ({ page }) => {
   const state = useFakeDocuments(page);
   await page.goto(baseURL);
   await openAAndEdit(page);
-  await page.getByTitle('Open Sources JSON').click();
-  await expect(page.getByTitle('Open Sources JSON')).toContainText('sources-b.json');
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
   await page.keyboard.press('ControlOrMeta+z');
+  await page.getByRole('button', { name: 'Inspector', exact: true }).click();
   await expect(page.locator('#quote-textarea')).toHaveValue('Document A original');
   await expect.poll(() => state.items.a[0].quote_original).toBe('Document A original');
 });
@@ -199,7 +174,7 @@ test('opening Sources preserves valid Items Undo history', async ({ page }) => {
 test('keyboard access changes the sidebar width and example flag', async ({ page }) => {
   const state = useFakeDocuments(page);
   await page.goto(baseURL);
-  await expect(page.getByTitle('Open Items JSON')).toContainText('items-a.json');
+  await expect(page.getByTitle('/projects/project-a.json')).toContainText('project-a.json');
 
   const separator = page.getByRole('separator', { name: 'Resize sidebar' });
   const initialWidth = Number(await separator.getAttribute('aria-valuenow'));
@@ -251,7 +226,7 @@ test('parser saves beside the selected reports without a native save dialog', as
   await expect(page.getByText('/reports/1946_Operation_Highjump', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Save to New File' }).click();
 
-  await expect(page.getByText('Saved scribity_items.json and scribity_sources.json', { exact: true })).toBeVisible();
+  await expect(page.getByText('Imported into new project', { exact: true })).toBeVisible();
   expect(state.importSaves).toHaveLength(1);
   expect(state.importSaves[0].selected_path).toBe('/reports/1946_Operation_Highjump');
   expect(state.items.a[0].id_item).toBe('imported-item');
@@ -429,9 +404,9 @@ test('new document dialog closes with Escape and returns focus to its persistent
 
   const createButton = page.getByTitle('Create new...');
   await createButton.click();
-  await page.getByRole('button', { name: 'New Document' }).click();
+  await page.getByRole('button', { name: 'New Project' }).click();
 
-  const dialog = page.getByRole('dialog', { name: 'New Document' });
+  const dialog = page.getByRole('dialog', { name: 'New Project' });
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveAttribute('aria-modal', 'true');
   await expect(page.getByRole('button', { name: /Book Mode/ })).toBeFocused();
@@ -466,7 +441,7 @@ test('save status is exposed as a polite live region', async ({ page }) => {
   const status = page.getByRole('status');
   await expect(status).toHaveAttribute('aria-live', 'polite');
   await openAAndEdit(page);
-  await expect(status).toHaveText('Saved');
+  await expect(status).toHaveText('Project saved');
 });
 
 test('icon-only controls have explicit accessible names', async ({ page }) => {

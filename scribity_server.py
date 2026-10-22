@@ -14,6 +14,8 @@ import threading
 import uuid
 from flask import Flask, request, jsonify, send_file
 from project_extraction import build_project
+from project_document import load_project
+from project_api import ProjectAPI
 
 # --- ATTEMPT TO LOAD GUI LIB ---
 TK_AVAILABLE = False
@@ -66,6 +68,8 @@ SOURCES_READY = False
 SAVE_LOCK = threading.RLock()
 ITEMS_DOCUMENT = {"token": uuid.uuid4().hex, "revision": 0}
 SOURCES_DOCUMENT = {"token": uuid.uuid4().hex, "revision": 0}
+PROJECT_PATH = None
+PROJECT_DOCUMENT = {"token": uuid.uuid4().hex, "revision": 0}
 
 # --- TEMPLATES BASED ON NEW SCHEMA ---
 
@@ -253,7 +257,7 @@ def invalid_document_shape_response(error, document):
 
 def current_document_state(document):
     """Return a copy of the active document's opaque identity and revision."""
-    state = ITEMS_DOCUMENT if document == "items" else SOURCES_DOCUMENT
+    state = PROJECT_DOCUMENT if PROJECT_PATH else (ITEMS_DOCUMENT if document == "items" else SOURCES_DOCUMENT)
     return {"token": state["token"], "revision": state["revision"]}
 
 
@@ -275,7 +279,7 @@ def document_request_is_current(document, supplied):
     """Check an optimistic-lock value while the caller holds SAVE_LOCK."""
     if not isinstance(supplied, dict):
         return False
-    expected = ITEMS_DOCUMENT if document == "items" else SOURCES_DOCUMENT
+    expected = PROJECT_DOCUMENT if PROJECT_PATH else (ITEMS_DOCUMENT if document == "items" else SOURCES_DOCUMENT)
     revision = supplied.get("revision")
     return (
         supplied.get("token") == expected["token"]
@@ -503,8 +507,10 @@ def save_config():
 
 def restore_last_used_paths():
     """Restore last-used files if a local config exists."""
-    global ITEMS_PATH, SOURCES_PATH
+    global ITEMS_PATH, SOURCES_PATH, PROJECT_PATH
     config = load_config()
+    if isinstance(config.get('project_path'), str) and config['project_path']:
+        PROJECT_PATH = config['project_path']
     items_path = config.get("items_path")
     sources_path = config.get("sources_path")
     if isinstance(items_path, str) and items_path:
@@ -513,6 +519,14 @@ def restore_last_used_paths():
         SOURCES_PATH = sources_path
 
 restore_last_used_paths()
+PROJECT_API = ProjectAPI(sys.modules[__name__])
+
+
+def active_records():
+    if PROJECT_PATH:
+        project = load_project(PROJECT_PATH)
+        return project['items'], project['sources']
+    return load_json(ITEMS_PATH), load_json(SOURCES_PATH)
 
 @app.route('/')
 def index():
@@ -527,6 +541,16 @@ def get_all_data():
     with SAVE_LOCK:
         ITEMS_READY = False
         SOURCES_READY = False
+
+        if PROJECT_PATH:
+            try:
+                project = load_project(PROJECT_PATH)
+                ITEMS_READY = SOURCES_READY = True
+                return jsonify(PROJECT_API.response(project))
+            except (ValueError, OSError) as error:
+                return jsonify(status='error', message=str(error),
+                               items_document=current_document_state('items'),
+                               sources_document=current_document_state('sources')), 422
 
         try:
             items = normalize_items(load_json(ITEMS_PATH))
@@ -858,14 +882,11 @@ def append_import():
 
         if imported_sources is not None:
             try:
-                existing_sources = load_json(SOURCES_PATH)
+                existing_items, existing_sources = active_records()
             except JsonDocumentError as error:
                 return json_document_error_response(error, "sources")
-
-            try:
-                existing_items = load_json(ITEMS_PATH)
-            except JsonDocumentError as error:
-                return json_document_error_response(error, "items")
+            except (ValueError, OSError) as error:
+                return jsonify(status='error', message=str(error)), 422
             repeated_reports = report_identities(imported_sources) & report_identities(existing_items + existing_sources)
             if repeated_reports:
                 return jsonify(
@@ -888,6 +909,8 @@ def append_import():
                 }), 409
 
         try:
+            if PROJECT_PATH:
+                return jsonify(PROJECT_API.save_snapshot(items_data, sources_data))
             save_json_pair(
                 ITEMS_PATH,
                 items_data,
@@ -1203,7 +1226,7 @@ def project_origin_error(record):
     error = project_session_error(record)
     if error is not None:
         return error
-    fingerprint = project_fingerprint(load_json(ITEMS_PATH), load_json(SOURCES_PATH))
+    fingerprint = project_fingerprint(*active_records())
     if fingerprint != record['origin_fingerprint']:
         return jsonify(status='error', kind='stale_document',
                        message='Research files changed after preview. Create a fresh preview.'), 409
@@ -1222,7 +1245,7 @@ def preview_project():
                 return error
             # The UI flushes edits before this point. Read original schema and
             # unknown metadata directly, without normalization or reconstruction.
-            items, sources = load_json(ITEMS_PATH), load_json(SOURCES_PATH)
+            items, sources = active_records()
             project = build_project(items, sources, payload.get('scope', 'draft'),
                                     payload.get('selected_ids'), payload.get('empty_draft', True))
             now = time.monotonic()
@@ -1237,7 +1260,7 @@ def preview_project():
                 'items_document': current_document_state('items'),
                 'sources_document': current_document_state('sources'),
                 'origin_fingerprint': project_fingerprint(items, sources),
-                'origin_paths': [ITEMS_PATH, SOURCES_PATH],
+                'origin_paths': [PROJECT_PATH] if PROJECT_PATH else [ITEMS_PATH, SOURCES_PATH],
             }
             return jsonify(status='success', preview_token=token,
                            counts=project['counts'], warnings=project['warnings'], errors=project['errors'])
@@ -1262,6 +1285,8 @@ def save_project():
                 return error
             if record['errors']:
                 raise ValueError('Resolve the preview errors before saving.')
+        if payload.get('single_file') or PROJECT_PATH:
+            return PROJECT_API.save_extraction(payload, record)
         items_path, sources_path = payload.get('items_path'), payload.get('sources_path')
         if not items_path and not sources_path:
             if not TK_AVAILABLE:
@@ -1327,7 +1352,12 @@ def open_project():
             record = project_preview_record(payload.get('project_token'))
             saved = record.get('saved')
             if not saved:
-                raise ValueError('Save both project files before opening them.')
+                raise ValueError('Save the extracted project before opening it.')
+            if saved.get('path'):
+                project = load_project(saved['path'])
+                if project_fingerprint(project['items'], project['sources']) != project_fingerprint(record['items'], record['sources']):
+                    raise ValueError('The saved project changed. Use Open Project to open it.')
+                return jsonify(PROJECT_API.activate(saved['path'], project))
             items, sources = load_json(saved['items_path']), load_json(saved['sources_path'])
             if project_fingerprint(items, sources) != project_fingerprint(record['items'], record['sources']):
                 raise ValueError('The saved project changed. Open its files using the ordinary file controls.')
@@ -1396,6 +1426,8 @@ def save_import_document():
                            message=f"Imported {name} require unique, nonempty identities."), 422
 
     try:
+        if payload.get('single_file') or PROJECT_PATH:
+            return PROJECT_API.save_import(payload)
         with SAVE_LOCK:
             if not document_request_is_current("items", payload.get("items_document")):
                 return stale_document_response("items")

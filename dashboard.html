@@ -1276,6 +1276,17 @@
             // Data States
             const [items, setItems] = useState([]);
             const [sources, setSources] = useState([]);
+            const [unifiedProject, setUnifiedProject] = useState(null);
+            const unifiedProjectRef = useRef(null);
+            const projectRawItemsRef = useRef([]);
+            const [projectNotices, setProjectNotices] = useState([]);
+            const [projectActionBusy, setProjectActionBusy] = useState(false);
+            const projectActionBusyRef = useRef(false);
+            const projectUndoStack = useRef([]);
+            const projectRedoStack = useRef([]);
+            const projectPendingSnapshot = useRef(null);
+            const projectEditTimer = useRef(null);
+            const projectHistoryToken = useRef(null);
             const sourceById = useMemo(() => {
                 const map = new Map();
                 sources.forEach(source => {
@@ -1579,6 +1590,58 @@
                 return payload;
             };
 
+            const activateUnifiedProject = (payload, preserveHistory = false) => {
+                clearTimerRef(projectEditTimer);
+                projectPendingSnapshot.current = null;
+                if (!preserveHistory) {
+                    projectUndoStack.current = [];
+                    projectRedoStack.current = [];
+                }
+                unifiedProjectRef.current = payload.project;
+                projectRawItemsRef.current = payload.items;
+                projectHistoryToken.current = payload.items_document.token;
+                setUnifiedProject(payload.project);
+                setProjectNotices(payload.notices || []);
+                activateItemsDocument({ rawItems: payload.items, filename: payload.items_filename,
+                    document: payload.items_document, mode: payload.project.schema_mode });
+                activateSourcesDocument({ sources: payload.sources, filename: payload.sources_filename,
+                    document: payload.sources_document });
+                setSupportTarget(null);
+                setLoadError(null);
+            };
+
+            const runProjectAction = async (operation, extra = {}) => {
+                if (projectActionBusyRef.current) return;
+                projectActionBusyRef.current = true;
+                setProjectActionBusy(true);
+                setShowCreateMenu(false);
+                setShowSaveMenu(false);
+                try {
+                    await flushAllPendingDocumentSaves();
+                    const payload = { operation, ...extra,
+                        items_document: itemsDocumentRef.current, sources_document: sourcesDocumentRef.current };
+                    const send = async () => readApiResponse(await api('project/action', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+                    }));
+                    let result = await send();
+                    if (result.status === 'gui_unavailable') {
+                        if (operation === 'convert' && !extra.use_current) {
+                            payload.items_path = prompt('Items JSON: enter the existing absolute file path');
+                            if (!payload.items_path) return;
+                            payload.sources_path = prompt('Sources JSON: enter the existing absolute file path');
+                            if (!payload.sources_path) return;
+                        }
+                        payload.path = prompt(operation === 'open' ? 'Project JSON: enter the absolute file path' : 'New project JSON: enter a new absolute file path');
+                        if (!payload.path) return;
+                        result = await send();
+                    }
+                    if (result.status === 'canceled') { setStatus('Canceled'); return; }
+                    activateUnifiedProject(result, operation === 'save_as');
+                    setStatus(operation === 'new' ? 'Created project' : 'Project opened');
+                } catch (error) { showErrorToast(error.message); setStatus('Project Error'); }
+                finally { projectActionBusyRef.current = false; setProjectActionBusy(false); }
+            };
+
             const reportLoadError = (error) => {
                 const message = error?.message || 'The document could not be loaded.';
                 setLoadError(message);
@@ -1681,6 +1744,11 @@
                 try {
                     const res = await api('data');
                     const json = await readApiResponse(res);
+                    if (json.project) {
+                        activateUnifiedProject(json);
+                        setStatus('Project loaded');
+                        return;
+                    }
                     const rawItems = json.items || [];
                     const mode = detectSchemaMode(rawItems);
                     activateItemsDocument({
@@ -1776,7 +1844,101 @@
                 void drain();
             };
 
+            // --- UNIFIED PROJECT OPERATIONS ---
+            const encodeProjectItems = (nextItems) => {
+                const mode = schemaModeRef.current;
+                if (mode !== 'research') return nextItems;
+                const originals = new Map(projectRawItemsRef.current.map(item => [item.id_item, item]));
+                return nextItems.map(item => {
+                    const original = originals.get(item.id_item);
+                    if (!original) return denormalizeItems([item], mode)[0];
+                    const normalized = normalizeItems([original], mode)[0];
+                    const result = { ...original };
+                    for (const key of new Set([...Object.keys(normalized), ...Object.keys(item)])) {
+                        if (JSON.stringify(normalized[key]) === JSON.stringify(item[key])) continue;
+                        const storedKey = key === 'rule_name' ? 'category_part_name' : key === 'rule_number' ? 'category_part_number' : key;
+                        if (item[key] === undefined) delete result[storedKey];
+                        else result[storedKey] = item[key];
+                    }
+                    return result;
+                });
+            };
+
+            const queueProjectSave = (nextItems, nextSources, successStatus = 'Project saved') => {
+                if (!itemsReady || !sourcesReady) {
+                    showErrorToast('Open a valid project before saving.');
+                    return false;
+                }
+                const originDocument = { ...itemsDocumentRef.current };
+                const rawItems = encodeProjectItems(nextItems);
+                enqueueSave(itemsSaveQueue, {
+                    endpoint: 'project/save', originDocument, documentRef: itemsDocumentRef,
+                    serialize: document => JSON.stringify({ items: rawItems, sources: nextSources,
+                        items_document: document, sources_document: document }),
+                    applyResponse: payload => {
+                        applyDocumentState('items', payload.items_document);
+                        applyDocumentState('sources', payload.sources_document);
+                        setProjectNotices(payload.notices || []);
+                    },
+                    savingStatus: 'Saving project...', successStatus, errorMessage: 'Project save failed',
+                });
+                return true;
+            };
+
+            const projectSnapshot = () => ({ items: itemsRef.current, sources: sourcesRef.current });
+            const applyProjectSnapshot = snapshot => {
+                itemsRef.current = snapshot.items; sourcesRef.current = snapshot.sources;
+                setItems(snapshot.items); setSources(snapshot.sources);
+            };
+            const rememberProject = snapshot => {
+                projectUndoStack.current.push(snapshot);
+                if (projectUndoStack.current.length > UNDO_LIMIT) projectUndoStack.current.shift();
+                projectRedoStack.current = [];
+            };
+            const commitProjectEdit = () => {
+                clearTimerRef(projectEditTimer);
+                if (!projectPendingSnapshot.current) return false;
+                rememberProject(projectPendingSnapshot.current);
+                projectPendingSnapshot.current = null;
+                return true;
+            };
+            const recordProjectEdit = (nextItems, nextSources, persist = true) => {
+                commitProjectEdit();
+                rememberProject(projectSnapshot());
+                applyProjectSnapshot({ items: nextItems, sources: nextSources });
+                if (persist) queueProjectSave(nextItems, nextSources);
+                return true;
+            };
+            const stageProjectEdit = (nextItems, nextSources) => {
+                if (!projectPendingSnapshot.current) projectPendingSnapshot.current = projectSnapshot();
+                projectRedoStack.current = [];
+                applyProjectSnapshot({ items: nextItems, sources: nextSources });
+                clearTimerRef(projectEditTimer);
+                projectEditTimer.current = setTimeout(() => {
+                    if (commitProjectEdit()) queueProjectSave(itemsRef.current, sourcesRef.current);
+                }, 600);
+            };
+            const restoreProjectHistory = direction => {
+                if (projectHistoryToken.current !== itemsDocumentRef.current.token) {
+                    clearTimerRef(projectEditTimer);
+                    projectPendingSnapshot.current = null;
+                    projectUndoStack.current = []; projectRedoStack.current = [];
+                    projectHistoryToken.current = itemsDocumentRef.current.token;
+                    return;
+                }
+                commitProjectEdit();
+                const from = direction === 'undo' ? projectUndoStack : projectRedoStack;
+                const to = direction === 'undo' ? projectRedoStack : projectUndoStack;
+                if (!from.current.length) return;
+                to.current.push(projectSnapshot());
+                if (to.current.length > UNDO_LIMIT) to.current.shift();
+                applyProjectSnapshot(from.current.pop());
+                clearDeleteUndoFor('items'); clearDeleteUndoFor('sources');
+                queueProjectSave(itemsRef.current, sourcesRef.current, `Project saved (${direction})`);
+            };
+            // --- LEGACY SAVE ADAPTERS ---
             const queueItemsSave = (newItems, successStatus = 'Saved') => {
+                if (unifiedProjectRef.current) return queueProjectSave(newItems, sourcesRef.current, successStatus);
                 if (!itemsReady) {
                     showErrorToast('Items were not saved because no valid items document is loaded.');
                     setStatus('Save Blocked');
@@ -1802,6 +1964,7 @@
             };
 
             const queueSourcesSave = (newSources, successStatus = 'Saved') => {
+                if (unifiedProjectRef.current) return queueProjectSave(itemsRef.current, newSources, successStatus);
                 if (!sourcesReady) {
                     showErrorToast('Sources were not saved because no valid sources document is loaded.');
                     setStatus('Save Blocked');
@@ -1826,6 +1989,11 @@
             };
 
             const flushPendingDocumentSaves = async (document) => {
+                if (unifiedProjectRef.current) {
+                    if (commitProjectEdit()) queueProjectSave(itemsRef.current, sourcesRef.current);
+                    await waitForSaveQueue(itemsSaveQueue);
+                    return;
+                }
                 if (document === 'items') {
                     if (commitPendingItemEdit()) queueItemsSave(itemsRef.current, 'Saved before switching');
                     await waitForSaveQueue(itemsSaveQueue);
@@ -1868,6 +2036,7 @@
 
             const stageItemEdit = (newItems, timer = inspectorSaveTimer) => {
                 if (!itemsReady) return;
+                if (unifiedProjectRef.current) return stageProjectEdit(newItems, sourcesRef.current);
                 if (!inspectorUndoSnapshot.current) inspectorUndoSnapshot.current = itemsRef.current;
                 redoStack.current = [];
                 itemsRef.current = newItems;
@@ -1880,6 +2049,7 @@
 
             const stageSourceEdit = (newSources) => {
                 if (!sourcesReady) return;
+                if (unifiedProjectRef.current) return stageProjectEdit(itemsRef.current, newSources);
                 if (!sourceUndoSnapshot.current) sourceUndoSnapshot.current = sourcesRef.current;
                 sourceRedoStack.current = [];
                 sourcesRef.current = newSources;
@@ -1896,6 +2066,7 @@
                     setStatus('Save Blocked');
                     return false;
                 }
+                if (unifiedProjectRef.current) return recordProjectEdit(newItems, sourcesRef.current);
                 commitPendingItemEdit();
                 rememberChange(undoStack, redoStack, itemsRef.current);
                 itemsRef.current = newItems;
@@ -1910,6 +2081,7 @@
                     setStatus('Save Blocked');
                     return false;
                 }
+                if (unifiedProjectRef.current) return recordProjectEdit(itemsRef.current, newSources);
                 commitPendingSourceEdit();
                 rememberChange(sourceUndoStack, sourceRedoStack, sourcesRef.current);
                 sourcesRef.current = newSources;
@@ -1919,7 +2091,8 @@
             };
 
             const restoreHistory = (direction) => {
-                if (projectModal || newDocModal || deleteConfirm) return;
+                if (projectModal || newDocModal || deleteConfirm || projectActionBusyRef.current) return;
+                if (unifiedProjectRef.current) return restoreProjectHistory(direction);
                 const isSource = view === 'sources';
                 if (isSource ? !sourcesReady : !itemsReady) return;
                 if (isSource && sourcesHistoryDocumentToken.current !== sourcesDocumentRef.current.token) {
@@ -1967,7 +2140,7 @@
                 if (!direction) return false;
                 const active = document.activeElement;
                 const isEditor = element => element?.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(element?.tagName?.toUpperCase());
-                if (isEditor(active) || isEditor(event.target) || projectModal || newDocModal || deleteConfirm) return true;
+                if (isEditor(active) || isEditor(event.target) || projectModal || newDocModal || deleteConfirm || projectActionBusyRef.current) return true;
                 event.preventDefault();
                 restoreHistory(direction);
                 return true;
@@ -2101,7 +2274,7 @@
             useEffect(() => {
                 const handler = (e) => {
                     if (handleHistoryShortcut(e)) return;
-                    if (projectModal || newDocModal || deleteConfirm) return;
+                    if (projectModal || newDocModal || deleteConfirm || projectActionBusyRef.current) return;
                     // E008: Arrow keys for inspector
                     if (view !== 'inspector' || !selectedItemId) return;
                     const tag = document.activeElement?.tagName?.toLowerCase();
@@ -2177,12 +2350,13 @@
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             preview_token: projectPreview.preview_token,
-                            ...(projectManualPaths ? { items_path: projectItemsPath, sources_path: projectSourcesPath } : {}),
+                            single_file: true,
+                            ...(projectManualPaths ? { path: projectItemsPath } : {}),
                         }),
                     });
                     const saved = await readApiResponse(response);
                     if (saved.status === 'canceled') {
-                        setProjectError('Save canceled. No project files were created; the original project remains open.');
+                        setProjectError('Save canceled. No project file was created; the original project remains open.');
                     } else if (saved.status === 'gui_unavailable') {
                         setProjectManualPaths(true);
                         setProjectError(saved.message);
@@ -2208,8 +2382,11 @@
                         }),
                     });
                     const opened = await readApiResponse(response);
-                    activateItemsDocument({ rawItems: opened.items, filename: opened.items_filename, document: opened.items_document });
-                    activateSourcesDocument({ sources: opened.sources, filename: opened.sources_filename, document: opened.sources_document });
+                    if (opened.project) activateUnifiedProject(opened);
+                    else {
+                        activateItemsDocument({ rawItems: opened.items, filename: opened.items_filename, document: opened.items_document });
+                        activateSourcesDocument({ sources: opened.sources, filename: opened.sources_filename, document: opened.sources_document });
+                    }
                     setSupportTarget(null);
                     setLoadError(null);
                     setStatus('Opened new project');
@@ -2669,7 +2846,7 @@
             };
 
             return (
-                <div className="flex h-full overflow-hidden">
+                <div className="flex h-full overflow-hidden" inert={projectActionBusy ? '' : undefined}>
 
                     {/* E009: Error Toast */}
                     {errorToast && (
@@ -3054,6 +3231,13 @@
                     {/* --- MAIN CONTENT --- */}
                     <div className="flex-1 flex flex-col bg-slate-950 min-w-0">
 
+                        {projectNotices.length > 0 && <details className="shrink-0 bg-amber-950 text-amber-100 text-sm px-4 py-2 max-h-40 overflow-auto">
+                            <summary>{projectNotices.length} existing relationship issues — records retained unchanged</summary>
+                            <ul className="list-disc pl-5">{projectNotices.map((notice, index) => <li key={index}>{notice}</li>)}</ul>
+                        </details>}
+                        {!unifiedProject && itemsReady && sourcesReady && <p className="shrink-0 px-4 py-2 text-xs text-amber-200 bg-slate-900">
+                            Legacy pair loaded: {itemsFilename} + {sourcesFilename}. Use Convert loaded pair to save one project; original files are kept.
+                        </p>}
                         {/* Header */}
                         <div role="region" aria-label="Application controls" className="min-h-14 border-b border-slate-800 flex flex-wrap items-center gap-3 px-4 py-2 justify-between shrink-0 bg-slate-950/80 backdrop-blur z-30 relative">
                             <div className="flex flex-wrap items-center gap-3 min-w-0 max-w-full">
@@ -3118,55 +3302,22 @@
                                 </div>
                             </div>
                             <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
-                                {/* File Picker Buttons */}
-                                <div className="flex flex-wrap items-center gap-2 max-w-full border-r border-slate-700 pr-2">
-                                    <button onClick={openItemsPicker} className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors" title="Open Items JSON">
-                                        <Icon name="folder-open" size={12} /> Items: <span className="text-indigo-400 max-w-[80px] truncate">{itemsFilename}</span>
-                                    </button>
-                                    <button onClick={openSourcesPicker} className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors" title="Open Sources JSON">
-                                        <Icon name="folder-open" size={12} /> Sources: <span className="text-emerald-400 max-w-[80px] truncate">{sourcesFilename}</span>
-                                    </button>
-                                </div>
+                                <button type="button" className="card-action" onClick={() => runProjectAction('open')}>Open Project</button>
+                                {unifiedProject ? <span className="text-xs text-indigo-300 truncate max-w-[220px]" title={unifiedProject.path}>{unifiedProject.filename}</span>
+                                    : <button type="button" className="card-action" disabled={!itemsReady || !sourcesReady}
+                                        onClick={() => runProjectAction('convert', { use_current: true, mode: schemaModeRef.current })}>Convert loaded pair</button>}
                                 <span role="status" aria-live="polite" aria-atomic="true" className={`text-xs font-mono px-2 py-1 rounded uppercase ${status.includes('Error') ? 'text-red-400 bg-red-900/20' : 'text-green-400 bg-green-900/20'}`}>{status}</span>
-                                <div role="group" aria-label={view === 'sources' ? 'Source history' : 'Item history'} className="flex items-center gap-1">
-                                    <button type="button" className="card-action" title={view === 'sources' ? 'Undo source change (⌘Z / Ctrl+Z)' : 'Undo item change (⌘Z / Ctrl+Z)'}
-                                        disabled={projectModal || newDocModal || Boolean(deleteConfirm) || (view === 'sources' ? !sourcesReady || (!sourceUndoStack.current.length && !sourceUndoSnapshot.current) : !itemsReady || (!undoStack.current.length && !inspectorUndoSnapshot.current))}
+                                <div role="group" aria-label={unifiedProject ? 'Project history' : view === 'sources' ? 'Source history' : 'Item history'} className="flex items-center gap-1">
+                                    <button type="button" className="card-action" title={unifiedProject ? 'Undo project action (⌘Z / Ctrl+Z)' : view === 'sources' ? 'Undo source change (⌘Z / Ctrl+Z)' : 'Undo item change (⌘Z / Ctrl+Z)'}
+                                        disabled={projectModal || newDocModal || Boolean(deleteConfirm) || (unifiedProject ? !itemsReady || !sourcesReady || (!projectUndoStack.current.length && !projectPendingSnapshot.current) : view === 'sources' ? !sourcesReady || (!sourceUndoStack.current.length && !sourceUndoSnapshot.current) : !itemsReady || (!undoStack.current.length && !inspectorUndoSnapshot.current))}
                                         onClick={() => restoreHistory('undo')}>↶ Undo</button>
                                     <button type="button" className="card-action" title="Redo (⌘Shift+Z / Ctrl+Shift+Z / Ctrl+Y)"
-                                        disabled={projectModal || newDocModal || Boolean(deleteConfirm) || (view === 'sources' ? !sourcesReady || !sourceRedoStack.current.length || Boolean(sourceUndoSnapshot.current) : !itemsReady || !redoStack.current.length || Boolean(inspectorUndoSnapshot.current))}
+                                        disabled={projectModal || newDocModal || Boolean(deleteConfirm) || (unifiedProject ? !itemsReady || !sourcesReady || !projectRedoStack.current.length || Boolean(projectPendingSnapshot.current) : view === 'sources' ? !sourcesReady || !sourceRedoStack.current.length || Boolean(sourceUndoSnapshot.current) : !itemsReady || !redoStack.current.length || Boolean(inspectorUndoSnapshot.current))}
                                         onClick={() => restoreHistory('redo')}>↷ Redo</button>
                                 </div>
 
-                                {/* Save As button */}
-                                <div className="relative">
-                                    <button
-                                        onClick={() => setShowSaveMenu(!showSaveMenu)}
-                                        className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition-colors"
-                                        title="Save As..."
-                                    >
-                                        <Icon name="hard-drive-download" size={13} /> Save As
-                                    </button>
-                                    {showSaveMenu && (
-                                        <>
-                                            <div className="fixed inset-0 z-40" onClick={() => setShowSaveMenu(false)} />
-                                            <div className="absolute right-0 top-full mt-2 z-50 bg-slate-800 border border-slate-600 rounded-lg shadow-2xl shadow-black/50 overflow-hidden min-w-[180px]" style={{ animation: 'slideIn 0.15s ease-out' }}>
-                                                <button
-                                                    onClick={() => { saveItemsAs(); setShowSaveMenu(false); }}
-                                                    className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-200 hover:bg-indigo-600 hover:text-white transition-colors"
-                                                >
-                                                    <Icon name="file-down" size={15} className="text-indigo-400" /> Save Items As
-                                                </button>
-                                                <div className="border-t border-slate-700" />
-                                                <button
-                                                    onClick={() => { saveSourcesAs(); setShowSaveMenu(false); }}
-                                                    className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-200 hover:bg-emerald-600 hover:text-white transition-colors"
-                                                >
-                                                    <Icon name="file-down" size={15} className="text-emerald-400" /> Save Sources As
-                                                </button>
-                                            </div>
-                                        </>
-                                    )}
-                                </div>
+                                <button type="button" className="card-action" disabled={!itemsReady || !sourcesReady}
+                                    onClick={() => unifiedProjectRef.current ? runProjectAction('save_as') : runProjectAction('convert', { use_current: true, mode: schemaModeRef.current })}>Save As…</button>
                                 {/* Create new + button */}
                                 <div className="relative">
                                     <button
@@ -3209,6 +3360,8 @@
                                                     <Icon name="file-text" size={15} className="text-orange-400" /> Import DRR Report
                                                 </button>
                                                 <div className="border-t border-slate-700" />
+                                                <button type="button" onClick={() => runProjectAction('convert')}
+                                                    className="w-full px-4 py-2.5 text-sm text-left text-slate-100 hover:bg-indigo-600">Import legacy items/sources pair…</button>
                                                 <button
                                                     onClick={beginProjectExtraction}
                                                     disabled={!itemsReady || !sourcesReady}
@@ -3219,7 +3372,7 @@
                                                     onClick={() => { setNewDocModal(true); setShowCreateMenu(false); }}
                                                     className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-200 hover:bg-violet-600 hover:text-white transition-colors"
                                                 >
-                                                    <Icon name="file" size={15} className="text-violet-400" /> New Document
+                                                    <Icon name="file" size={15} className="text-violet-400" /> New Project
                                                 </button>
                                             </div>
                                         </>
@@ -3273,18 +3426,16 @@
                                                 </details>
                                                 <label className="flex gap-2 mt-3 text-sm text-slate-200"><input type="checkbox" checked={projectAcknowledged} disabled={projectBusy} onChange={event => setProjectAcknowledged(event.target.checked)} />I understand these changes apply only to the new project.</label>
                                             </>}
-                                            <label className="flex gap-2 mt-4 text-sm text-slate-200"><input type="checkbox" checked={projectManualPaths} disabled={projectBusy} onChange={event => setProjectManualPaths(event.target.checked)} />Enter file paths instead of using save dialogs</label>
+                                            <label className="flex gap-2 mt-4 text-sm text-slate-200"><input type="checkbox" checked={projectManualPaths} disabled={projectBusy} onChange={event => setProjectManualPaths(event.target.checked)} />Enter a file path instead of using the save dialog</label>
                                             {projectManualPaths && <div className="mt-3 space-y-2">
-                                                <label className="block text-sm text-slate-200">New items file<input className="custom-input" disabled={projectBusy} value={projectItemsPath} onChange={event => setProjectItemsPath(event.target.value)} placeholder="/absolute/path/episode_items.json" /></label>
-                                                <label className="block text-sm text-slate-200">New sources file<input className="custom-input" disabled={projectBusy} value={projectSourcesPath} onChange={event => setProjectSourcesPath(event.target.value)} placeholder="/absolute/path/episode_sources.json" /></label>
+                                                <label className="block text-sm text-slate-200">New project file<input className="custom-input" disabled={projectBusy} value={projectItemsPath} onChange={event => setProjectItemsPath(event.target.value)} placeholder="/absolute/path/episode.json" /></label>
                                             </div>}
-                                            <p className="text-xs text-slate-400 mt-3">Choose two new filenames in existing folders. Existing files are never overwritten.</p>
-                                            <button type="button" className="card-action mt-3" onClick={saveProject} disabled={projectBusy || projectPreview.errors.length > 0 || (projectPreview.warnings.length > 0 && !projectAcknowledged) || (projectManualPaths && (!projectItemsPath.trim() || !projectSourcesPath.trim()))}>Save new project…</button>
+                                            <p className="text-xs text-slate-400 mt-3">Choose a new project filename in an existing folder. Existing files are never overwritten.</p>
+                                            <button type="button" className="card-action mt-3" onClick={saveProject} disabled={projectBusy || projectPreview.errors.length > 0 || (projectPreview.warnings.length > 0 && !projectAcknowledged) || (projectManualPaths && !projectItemsPath.trim())}>Save new project…</button>
                                         </section>}
                                     </> : <section className="text-sm text-slate-200 space-y-3">
-                                        <p className="text-green-300 font-bold">Both project files saved. The original project is still open.</p>
-                                        <p className="break-all">Items: {projectSaved.items_path}</p>
-                                        <p className="break-all">Sources: {projectSaved.sources_path}</p>
+                                        <p className="text-green-300 font-bold">Project file saved. The original project is still open.</p>
+                                        <p className="break-all">Project: {projectSaved.path}</p>
                                         <button type="button" className="card-action" disabled={projectBusy} onClick={openSavedProject}>Open new project</button>
                                     </section>}
                                     {projectBusy && <p role="status" className="mt-3 text-sm text-slate-300">Working… If a save dialog is open, choose a filename or cancel it.</p>}
@@ -3292,7 +3443,7 @@
                                     <button type="button" className="card-action mt-4" disabled={projectBusy} onClick={() => setProjectModal(false)}>{projectSaved ? 'Done — keep original open' : 'Cancel'}</button>
                                 </AccessibleModal>
 
-                                {/* New Document — mode picker modal */}
+                                {/* New Project — mode picker modal */}
                                 <AccessibleModal
                                     open={newDocModal}
                                     onClose={() => setNewDocModal(false)}
@@ -3302,8 +3453,8 @@
                                     overlayClassName="z-50 bg-black/60 px-4"
                                     panelClassName="bg-slate-900 border border-slate-600 rounded-xl shadow-2xl shadow-black/60 p-6 w-80"
                                 >
-                                                <h3 id="new-document-dialog-title" className="text-white font-bold text-base mb-1">New Document</h3>
-                                                <p id="new-document-dialog-description" className="text-slate-400 text-xs mb-5">Choose a schema, then pick where to save the two new JSON files.</p>
+                                                <h3 id="new-document-dialog-title" className="text-white font-bold text-base mb-1">New Project</h3>
+                                                <p id="new-document-dialog-description" className="text-slate-400 text-xs mb-5">Choose a mode, then save one project JSON containing its items and sources.</p>
                                                 <div className="flex flex-col gap-3">
                                                     {[
                                                         { mode: 'improv',   label: 'Book Mode',  sub: 'Rules & subparts',           icon: 'book' },
@@ -3312,35 +3463,7 @@
                                                         <button
                                                             key={mode}
                                                             data-modal-initial-focus={mode === 'improv' ? 'true' : undefined}
-                                                            onClick={async () => {
-                                                                setNewDocModal(false);
-                                                                try {
-                                                                    await flushAllPendingDocumentSaves();
-                                                                    const r = await api('new_document', {
-                                                                        method: 'POST',
-                                                                        headers: { 'Content-Type': 'application/json' },
-                                                                        body: JSON.stringify({
-                                                                            items_document: itemsDocumentRef.current,
-                                                                            sources_document: sourcesDocumentRef.current,
-                                                                        }),
-                                                                    });
-                                                                    const d = await readApiResponse(r);
-                                                                    if (d.status === 'canceled') return;
-                                                                    activateItemsDocument({
-                                                                        rawItems: [],
-                                                                        filename: d.items_filename,
-                                                                        document: d.items_document,
-                                                                        mode,
-                                                                    });
-                                                                    activateSourcesDocument({
-                                                                        sources: [],
-                                                                        filename: d.sources_filename,
-                                                                        document: d.sources_document,
-                                                                    });
-                                                                    setLoadError(null);
-                                                                    setStatus('New ' + mode + ' document');
-                                                                } catch (e) { showErrorToast('Server error: ' + e.message); }
-                                                            }}
+                                                            onClick={() => { setNewDocModal(false); runProjectAction('new', { mode }); }}
                                                             className="flex items-start gap-3 p-3 rounded-lg border border-slate-700 hover:border-slate-500 hover:bg-slate-800 text-left transition-all"
                                                         >
                                                             <div className="mt-0.5 p-1.5 rounded-md bg-slate-800 text-slate-400">
@@ -4625,6 +4748,7 @@
                                                                         method: 'POST',
                                                                         headers: { 'Content-Type': 'application/json' },
                                                                         body: JSON.stringify({
+                                                                            single_file: true,
                                                                             can_import: parseResult.can_import,
                                                                             diagnostics: parseResult.diagnostics,
                                                                             items: parseResult.items,
@@ -4635,6 +4759,12 @@
                                                                         })
                                                                     });
                                                                     const d = await readApiResponse(r);
+                                                                    if (d.project) {
+                                                                        activateUnifiedProject(d);
+                                                                        setParseResult(null); setView('library'); setStatus('Imported into new project');
+                                                                        return;
+                                                                    }
+
                                                                     // Reload — apply full normalization same as initial fetchData
                                                                     const reload = await api('data');
                                                                     const fresh = await readApiResponse(reload);
@@ -4711,7 +4841,7 @@
                                                                         method: 'POST',
                                                                         headers: { 'Content-Type': 'application/json' },
                                                                         body: JSON.stringify({
-                                                                            items: denormalizeItems(newItems, schemaModeRef.current),
+                                                                            items: unifiedProjectRef.current ? encodeProjectItems(newItems) : denormalizeItems(newItems, schemaModeRef.current),
                                                                             sources: newSources,
                                                                             imported_sources: importedSources,
                                                                             can_import: parseResult.can_import,
@@ -4723,11 +4853,16 @@
                                                                     const saved = await readApiResponse(response);
                                                                     applyDocumentState('items', saved.items_document);
                                                                     applyDocumentState('sources', saved.sources_document);
-                                                                    undoStack.current.push([...itemsRef.current]);
-                                                                    if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
-                                                                    redoStack.current = [];
-                                                                    setItems(newItems);
-                                                                    setSources(newSources);
+                                                                    if (unifiedProjectRef.current) {
+                                                                        recordProjectEdit(newItems, newSources, false);
+                                                                        setProjectNotices(saved.notices || []);
+                                                                    } else {
+                                                                        undoStack.current.push([...itemsRef.current]);
+                                                                        if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
+                                                                        redoStack.current = [];
+                                                                        itemsRef.current = newItems; sourcesRef.current = newSources;
+                                                                        setItems(newItems); setSources(newSources);
+                                                                    }
                                                                     setParseResult(null);
                                                                     setView('library');
                                                                     setStatus('Appended to current file');
